@@ -9,11 +9,11 @@ let VW = 0, VH = 0, DPR = 1, CELL = 40, OX = 0, OY = 0;
 
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
-  // size to the visible area (100vh on mobile Safari includes space behind the toolbars)
-  VW = window.innerWidth;
-  VH = window.innerHeight;
-  canvas.style.width = VW + 'px';
-  canvas.style.height = VH + 'px';
+  // lay out for the size the canvas is actually shown at, so drawing and taps
+  // agree however the browser sizes the viewport (mobile toolbars, 100vh quirks)
+  const r = canvas.getBoundingClientRect();
+  VW = Math.round(r.width) || window.innerWidth;
+  VH = Math.round(r.height) || window.innerHeight;
   canvas.width = Math.round(VW * DPR);
   canvas.height = Math.round(VH * DPR);
   const top = 58, bottom = 34;
@@ -1275,6 +1275,8 @@ window.addEventListener('blur', () => { held.clear(); chord = new Set(); });
 // ============================================================ loop
 function frame(t) {
   G.clock = t / 1000;
+  const r = canvas.getBoundingClientRect();
+  if (Math.abs(r.width - VW) > 1 || Math.abs(r.height - VH) > 1) resize();
   update();
   draw();
   requestAnimationFrame(frame);
