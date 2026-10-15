@@ -9,8 +9,11 @@ let VW = 0, VH = 0, DPR = 1, CELL = 40, OX = 0, OY = 0;
 
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
+  // size to the visible area (100vh on mobile Safari includes space behind the toolbars)
   VW = window.innerWidth;
   VH = window.innerHeight;
+  canvas.style.width = VW + 'px';
+  canvas.style.height = VH + 'px';
   canvas.width = Math.round(VW * DPR);
   canvas.height = Math.round(VH * DPR);
   const top = 58, bottom = 34;
@@ -19,6 +22,8 @@ function resize() {
   OY = Math.floor(top + (VH - top - bottom - CELL * N) / 2);
 }
 window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
 resize();
 
 const TAU = Math.PI * 2;
@@ -1182,6 +1187,12 @@ function drawHud() {
 }
 
 // ============================================================ input
+// screen point -> canvas layout coordinates, whatever size the canvas is displayed at
+function toLocal(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) * (VW / (r.width || VW)), (e.clientY - r.top) * (VH / (r.height || VH))];
+}
+
 function markerAt(mx, my) {
   const x = Math.floor((mx - OX) / CELL), y = Math.floor((my - OY) / CELL);
   return G.markers.find(o => o.ex === x && o.ey === y) || null;
@@ -1195,7 +1206,7 @@ function restartIfOver() {
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('pointermove', e => {
   if (e.pointerType !== 'mouse' || busy() || G.over) return;
-  const m = markerAt(e.clientX, e.clientY);
+  const m = markerAt(...toLocal(e));
   if (m !== G.hover) G.hover = m;
 });
 canvas.addEventListener('pointerdown', e => {
@@ -1204,7 +1215,7 @@ canvas.addEventListener('pointerdown', e => {
   Sfx.ensure();
   if (restartIfOver()) return;
   if (busy()) return;
-  const m = markerAt(e.clientX, e.clientY);
+  const m = markerAt(...toLocal(e));
   if (e.pointerType === 'mouse') {
     if (m) commit(m);
     return;
