@@ -1,6 +1,10 @@
-# 残響 (Zankyo)
+# aidev1
 
-A browser game. Static files only (`index.html`, `game.js`), with no build step and no dependencies.
+Browser games. Static files only, with no build step and no dependencies.
 
-- Play locally: open `index.html` in a browser, or run `npx http-server .`
-- GitHub Pages: publish the repository root (`index.html` is at the root)
+| Game | Path | GitHub Pages |
+| --- | --- | --- |
+| 残響 (Zankyo) | `index.html`, `game.js` | https://tishiyama1.github.io/aidev1/ |
+| 慣性 (Kansei) | `kansei/` | https://tishiyama1.github.io/aidev1/kansei/ |
+
+- Play locally: open the game's `index.html` in a browser, or run `npx http-server .`
