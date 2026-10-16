@@ -256,6 +256,32 @@ function simulate(ax, ay) {
   return { ax, ay, ex: x, ey: y, vx, vy, speed: n, path, kills, killSet, bounces, crash, clank, stomp };
 }
 
+// is there at least one move that lands outside every marked cell?
+function anySafe() {
+  for (let ay = -1; ay <= 1; ay++) {
+    for (let ax = -1; ax <= 1; ax++) {
+      const o = simulate(ax, ay);
+      if (!threatCells(o.killSet).has(o.ey * N + o.ex)) return true;
+    }
+  }
+  return false;
+}
+
+// Keep a way out. Mortars never close off every move; and right after a hit,
+// no enemy may, so hits can't follow one another unavoidably. Enemies that
+// would close it off hold their fire this turn (mortars first).
+function ensureEscape(justHit) {
+  if (anySafe()) return;
+  for (const t of justHit ? ['mortar', 'lancer', 'shell', 'spike'] : ['mortar']) {
+    for (const e of G.enemies) {
+      if (e.type !== t || !e.marks.length) continue;
+      e.marks = [];
+      e.aim = null;
+      if (anySafe()) return;
+    }
+  }
+}
+
 function threatCells(killSet) {
   const s = new Set();
   for (const e of G.enemies) {
@@ -309,7 +335,7 @@ function pickType() {
   const w = [['spike', 3]];
   if (f >= 2) w.push(['lancer', 2]);
   if (f >= 3) w.push(['shell', 1.6]);
-  if (f >= 4) w.push(['mortar', 1.4]);
+  if (f >= 5) w.push(['mortar', 1.4]);
   let tot = 0;
   for (const [, v] of w) tot += v;
   let r = rnd() * tot;
@@ -349,7 +375,9 @@ function legalStep(e, dx, dy) {
   return true;
 }
 
-function alignedDir(ex, ey) {
+// a clear straight line (rook or bishop) from (ex, ey) to the player;
+// walls and other enemies block it
+function alignedDir(ex, ey, self) {
   const P = G.player;
   const dx = P.x - ex, dy = P.y - ey;
   if (!dx && !dy) return null;
@@ -358,6 +386,8 @@ function alignedDir(ex, ey) {
   let x = ex + sx, y = ey + sy;
   while (x !== P.x || y !== P.y) {
     if (blocked(x, y)) return null;
+    const o = enemyAt(x, y);
+    if (o && o !== self) return null;
     x += sx; y += sy;
   }
   return [sx, sy];
@@ -403,11 +433,11 @@ function moveEnemy(e, d) {
     e.slow ^= 1;
     if (e.slow) stepToStrike(e, d, ADJ);
   } else if (e.type === 'lancer') {
-    if (alignedDir(e.x, e.y)) return;
+    if (alignedDir(e.x, e.y, e)) return;
     const opts = [];
     for (const [dx, dy] of DIRS8) {
       if (!legalStep(e, dx, dy)) continue;
-      if (alignedDir(e.x + dx, e.y + dy) && cheb(e.x + dx, e.y + dy, P.x, P.y) >= 2) opts.push([dx, dy]);
+      if (alignedDir(e.x + dx, e.y + dy, e) && cheb(e.x + dx, e.y + dy, P.x, P.y) >= 2) opts.push([dx, dy]);
     }
     if (opts.length) {
       const [dx, dy] = pick(opts);
@@ -436,11 +466,11 @@ function computeMarks(e) {
       if (!blocked(e.x + dx, e.y + dy)) e.marks.push([e.x + dx, e.y + dy]);
     }
   } else if (e.type === 'lancer') {
-    const dir = alignedDir(e.x, e.y);
+    const dir = alignedDir(e.x, e.y, e);
     if (!dir) return;
     e.aim = dir;
     let x = e.x + dir[0], y = e.y + dir[1];
-    while (!blocked(x, y)) { e.marks.push([x, y]); x += dir[0]; y += dir[1]; }
+    while (!blocked(x, y) && !enemyAt(x, y)) { e.marks.push([x, y]); x += dir[0]; y += dir[1]; }
   } else if (e.type === 'mortar') {
     if (cheb(e.x, e.y, P.x, P.y) > 6) return;
     // it shells where your momentum is taking you
@@ -466,7 +496,7 @@ function placeSpawn(minDist) {
 // ============================================================ floors
 function startFloor() {
   G.grid = genArena(G.floor);
-  G.edgeBounce = G.floor >= 3 && rnd() < 0.35;
+  G.edgeBounce = G.floor >= 6 && rnd() < 0.35;
   const P = G.player;
   P.x = 5; P.y = 5; P.vx = 0; P.vy = 0;
   G.enemies = [];
@@ -483,6 +513,7 @@ function startFloor() {
     G.enemies.push(e);
   }
   for (const e of G.enemies) computeMarks(e);
+  ensureEscape(true);
   G.pendingClear = false;
   G.floorHurt = false;
   computeOptions();
@@ -532,7 +563,7 @@ function commit(o) {
   if (!o || G.over || busy()) return;
   const P = G.player;
   const now = G.clock;
-  G.oldMarks = G.enemies.map(e => ({ id: e.id, type: e.type, cells: e.marks.slice() }));
+  G.oldMarks = G.enemies.map(e => ({ id: e.id, type: e.type, cells: e.marks.slice(), aim: e.aim }));
   G.deadAt = new Map();
   G.path = o.path;
   const pathDur = Math.max(0.12, (o.path.length - 1) * STEP_T);
@@ -666,6 +697,7 @@ function enemyPhase(t) {
 
   // 4. intentions
   for (const e of G.enemies) computeMarks(e);
+  ensureEscape(hurt);
 
   // 5. reinforcements
   const onBoard = G.enemies.length + G.spawns.length;
@@ -806,8 +838,49 @@ function drawEnemy(type, x, y, e, a, scale) {
   ctx.globalAlpha = 1;
 }
 
-function drawMarks(cells, color, a) {
+function drawMarks(cells, type, a, aim) {
+  const color = TYPES[type].color;
   ctx.fillStyle = color;
+  if (type === 'lancer') {
+    // a line of fire
+    for (const [x, y] of cells) {
+      ctx.globalAlpha = 0.16 * a;
+      ctx.fillRect(X(x) + 2, Y(y) + 2, CELL - 4, CELL - 4);
+    }
+    if (cells.length) {
+      const [x0, y0] = cells[0], [x1, y1] = cells[cells.length - 1];
+      const dx = aim ? aim[0] : sign(x1 - x0), dy = aim ? aim[1] : sign(y1 - y0);
+      ctx.globalAlpha = 0.85 * a;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(2, CELL * 0.07);
+      ctx.beginPath();
+      ctx.moveTo(CX(x0) - dx * CELL * 0.5, CY(y0) - dy * CELL * 0.5);
+      ctx.lineTo(CX(x1) + dx * CELL * 0.35, CY(y1) + dy * CELL * 0.35);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    return;
+  }
+  if (type === 'mortar') {
+    // a crosshair on each cell
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1.5, CELL * 0.045);
+    for (const [x, y] of cells) {
+      ctx.globalAlpha = 0.2 * a;
+      ctx.fillRect(X(x) + 2, Y(y) + 2, CELL - 4, CELL - 4);
+      ctx.globalAlpha = 0.85 * a;
+      const cx = CX(x), cy = CY(y), r = CELL * 0.24;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, TAU);
+      ctx.moveTo(cx - r * 1.5, cy); ctx.lineTo(cx - r * 0.5, cy);
+      ctx.moveTo(cx + r * 0.5, cy); ctx.lineTo(cx + r * 1.5, cy);
+      ctx.moveTo(cx, cy - r * 1.5); ctx.lineTo(cx, cy - r * 0.5);
+      ctx.moveTo(cx, cy + r * 0.5); ctx.lineTo(cx, cy + r * 1.5);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    return;
+  }
   for (const [x, y] of cells) {
     ctx.globalAlpha = 0.2 * a;
     ctx.fillRect(X(x) + 2, Y(y) + 2, CELL - 4, CELL - 4);
@@ -883,7 +956,7 @@ function draw() {
       const da = G.deadAt.get(m.id);
       if (da != null && now >= da) continue;
       if (now >= G.tl.enemyT) continue;
-      drawMarks(m.cells, TYPES[m.type].color, 1);
+      drawMarks(m.cells, m.type, 1, m.aim);
     }
   } else if (!G.over) {
     const pulse = 0.8 + 0.2 * Math.sin(now * 5);
@@ -891,7 +964,7 @@ function draw() {
     for (const e of G.enemies) {
       if (!e.marks.length) continue;
       const cancelled = ks && ks.has(e);
-      drawMarks(e.marks, TYPES[e.type].color, cancelled ? 0.18 : pulse);
+      drawMarks(e.marks, e.type, cancelled ? 0.18 : pulse, e.aim);
     }
   }
   for (const f of G.flashes) {
@@ -955,9 +1028,32 @@ function draw() {
       ctx.strokeStyle = col;
       ctx.lineWidth = 2;
       ctx.globalAlpha = isAct ? 1 : 0.8;
+      const stops = !!(o.crash || o.clank);
+      // a dark backing so the marker stays readable on top of any threat mark
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = '#0b0e14';
       ctx.beginPath();
-      ctx.arc(cx, cy, o.ex === P.x && o.ey === P.y ? CELL * 0.42 : r, 0, TAU);
+      ctx.arc(cx, cy, (o.ex === P.x && o.ey === P.y ? CELL * 0.42 : r) + 4, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+      ctx.beginPath();
+      if (o.ex === P.x && o.ey === P.y) ctx.arc(cx, cy, CELL * 0.42, 0, TAU);
+      else if (stops) ctx.rect(cx - r, cy - r, r * 2, r * 2);
+      else ctx.arc(cx, cy, r, 0, TAU);
       ctx.stroke();
+      if (o.bounces.length && (o.vx || o.vy)) {
+        // momentum after the bounce
+        const L = Math.hypot(o.vx, o.vy), ux = o.vx / L, uy = o.vy / L;
+        const a0 = r + 2, a1 = r + CELL * 0.26, h = CELL * 0.09;
+        ctx.beginPath();
+        ctx.moveTo(cx + ux * a0, cy + uy * a0);
+        ctx.lineTo(cx + ux * a1, cy + uy * a1);
+        ctx.moveTo(cx + ux * a1 - ux * h - uy * h, cy + uy * a1 - uy * h + ux * h);
+        ctx.lineTo(cx + ux * a1, cy + uy * a1);
+        ctx.lineTo(cx + ux * a1 - ux * h + uy * h, cy + uy * a1 - uy * h - ux * h);
+        ctx.stroke();
+      }
       if (o.kills.length && !(o.ex === P.x && o.ey === P.y)) {
         ctx.fillStyle = '#ffe14d';
         for (let i = 0; i < o.kills.length; i++) {
