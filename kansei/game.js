@@ -809,8 +809,8 @@ function busy() { return G.tl && G.clock < G.tl.end; }
 // ============================================================ flight plans
 // Altitudes are in cells above the sea. The glass cube above the board is CUBE_H high.
 const CUBE_H = N;   // a true cube: as tall as the board is wide
-const enemyAlt = id => 2.3 + 0.8 * ((id * 5) % 4) / 3;      // 2.3 .. 3.1
-const playerAlt = 2.6;
+const enemyAlt = id => 3.0 + 0.9 * ((id * 5) % 4) / 3;      // 3.0 .. 3.9
+const playerAlt = 3.4;
 function fallPos(sx, sy, sz, lx, ly, u) {
   const e = u * u;
   return [sx + (lx - sx) * u, sy + (ly - sy) * u, sz * (1 - e) + 0.05];
@@ -927,7 +927,7 @@ const smooth = v => v * v * (3 - 2 * v);
 // ---------------------------------------------------------------- camera
 const ZOOM_ACT = 1.75, ZOOM_ENEMY = 1.4;
 const CAM = { fx: N / 2, fy: N / 2, zf: ZOOM_ACT, last: null, t: 0, sinP: 1, cosP: 0, c: 1, s: 0, zoom: 1, bx: 0, by: 0, bx0: 0, by0: 0, shx: 0, shy: 0 };
-const PITCH_DOWN = Math.PI / 2, PITCH_FLY = 0.66, YAW_FLY = -0.26, SLAB_D = 1.5;
+const PITCH_DOWN = Math.PI / 2, PITCH_FLY = 0.62, YAW_FLY = -0.55, SLAB_D = 2.4;
 function updateCam(now) {
   let t = 0;
   const tl = G.tl;
@@ -1087,7 +1087,7 @@ function drawSlab() {
     };
     // the sea, seen in section
     const wg = ctx.createLinearGradient(0, quad[0][1], 0, quad[3][1]);
-    wg.addColorStop(0, '#5cb2e2'); wg.addColorStop(0.45, '#2b82bd'); wg.addColorStop(1, '#13507f');
+    wg.addColorStop(0, '#6cc4e4'); wg.addColorStop(0.4, '#2f8cc4'); wg.addColorStop(1, '#0f4674');
     ctx.fillStyle = wg;
     poly(quad);
     ctx.fill();
@@ -1095,7 +1095,7 @@ function drawSlab() {
     const cols = N * 2;
     for (let i = 0; i < cols; i++) {
       const u0 = i / cols, u1 = (i + 1) / cols;
-      const top = 0.3 + 0.5 * hash2(i * 3 + fi, 77 + fi);
+      const top = 0.42 + 0.5 * hash2(i * 3 + fi, 77 + fi) * (0.4 + 0.6 * hash2(Math.floor(i / 3), fi + 5));
       const tone = 56 + Math.floor(hash2(i, fi + 9) * 26);
       ctx.fillStyle = `rgb(${tone},${tone + 2},${tone + 8})`;
       poly([P(u0, top), P(u1, top), P(u1, 1), P(u0, 1)]);
@@ -1306,34 +1306,39 @@ function vnoise(x, y) {
   return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
 }
 // neighbouring islands rise and fall together, like hills
-function wallHeight(x, y) { return 0.42 + 1.0 * vnoise(x * 0.62 + 3.1, y * 0.62 + 7.7); }
+function wallHeight(x, y) { return 0.55 + 1.35 * Math.pow(vnoise(x * 0.62 + 3.1, y * 0.62 + 7.7), 1.15); }
 const isWall = (x, y) => inB(x, y) && cellType(x, y) === 1;
 function rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
 function mixc(a, b, t) { const A = rgb(a), B = typeof b === 'string' ? rgb(b) : b; return `rgb(${Math.round(A[0] + (B[0] - A[0]) * t)},${Math.round(A[1] + (B[1] - A[1]) * t)},${Math.round(A[2] + (B[2] - A[2]) * t)})`; }
-function drawBlock(x, y) {
-  const h = wallHeight(x, y);
-  const hv = hash2(x * 7 + 1, y * 5 + 9);
-  const hi = clamp((h - 0.42) / 1.0, 0, 1);               // 0 low shore .. 1 high crag
-  const topA = mixc('#86b44e', '#c4d27a', hi * 0.8);
-  const topB = mixc('#5f9236', '#8fb25a', hi * 0.8);
+// each island cell is four rock pillars of different heights, so the coast reads as craggy stone
+const pillarH = (i, j) => wallHeight(i >> 1, j >> 1) * (0.4 + 0.75 * Math.pow(hash2(i * 7 + 3, j * 5 + 1), 1.3));
+const isWallSub = (i, j) => isWall(i >> 1, j >> 1);
+function drawPillar(i, j) {
+  const W = 0.5, x = i * W, y = j * W;
+  const cx = i >> 1, cy = j >> 1;
+  const h = pillarH(i, j);
+  const hv = hash2(cx * 7 + 1, cy * 5 + 9);
+  const hi = clamp((wallHeight(cx, cy) - 0.55) / 1.35, 0, 1);
+  const topA = mixc('#8aa24a', '#a3a98a', hi * 0.7);
+  const topB = mixc('#65823a', '#7d8466', hi * 0.7);
   const sides = [
-    [[x, y + 1], [x + 1, y + 1], '#a89a8c', 0, 1],
-    [[x + 1, y + 1], [x + 1, y], '#7d7066', 1, 0],
-    [[x + 1, y], [x, y], '#6b5f56', 0, -1],
-    [[x, y], [x, y + 1], '#8a7c70', -1, 0],
+    [[x, y + W], [x + W, y + W], '#9d9a96', 0, 1],
+    [[x + W, y + W], [x + W, y], '#76726f', 1, 0],
+    [[x + W, y], [x, y], '#625f5e', 0, -1],
+    [[x, y], [x, y + W], '#86827d', -1, 0],
   ];
   for (let si = 0; si < 4; si++) {
     const [a, b, col, nx, ny] = sides[si];
-    const nh = isWall(x + nx, y + ny) ? wallHeight(x + nx, y + ny) : 0;
+    const nh = isWallSub(i + nx, j + ny) ? pillarH(i + nx, j + ny) : 0;
     if (nh >= h) continue;
     const Ba = proj(a[0], a[1], nh), Bb = proj(b[0], b[1], nh), Tb = proj(b[0], b[1], h), Ta = proj(a[0], a[1], h);
     const quad = [Ba, Bb, Tb, Ta];
     if (area(quad) >= -0.5) continue;
     const mx = (Ta[0] + Tb[0]) / 2, my = (Ta[1] + Tb[1]) / 2, bx = (Ba[0] + Bb[0]) / 2, by = (Ba[1] + Bb[1]) / 2;
     const gr = ctx.createLinearGradient(mx, my, bx, by);
-    gr.addColorStop(0, mixc(col, '#ffffff', 0.22));
+    gr.addColorStop(0, mixc(col, '#ffffff', 0.2));
     gr.addColorStop(0.5, col);
-    gr.addColorStop(1, mixc(col, '#2c3a4a', nh ? 0.2 : 0.5));
+    gr.addColorStop(1, mixc(col, '#2c3a4a', nh ? 0.25 : 0.5));
     ctx.fillStyle = gr;
     poly(quad);
     ctx.fill();
@@ -1341,30 +1346,29 @@ function drawBlock(x, y) {
     ctx.save();
     poly(quad);
     ctx.clip();
-    // strata and cracks
-    ctx.lineWidth = 1;
-    for (let k = 1; k <= 3; k++) {
-      const v = (k + 0.3 * hash2(x * 3 + k, y * 5 + si)) / 4.2;
-      const l = P(0, v), r = P(1, v);
-      ctx.strokeStyle = 'rgba(40,30,28,0.22)';
-      ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(r[0], r[1]); ctx.stroke();
-      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-      ctx.beginPath(); ctx.moveTo(l[0], l[1] + 1.5); ctx.lineTo(r[0], r[1] + 1.5); ctx.stroke();
-    }
-    const cu = 0.2 + 0.6 * hash2(x * 9 + si, y * 4);
-    const c0 = P(cu, 0.15), c1 = P(cu + 0.06, 0.55), c2 = P(cu - 0.03, 0.9);
-    ctx.strokeStyle = 'rgba(30,22,20,0.3)';
-    ctx.beginPath(); ctx.moveTo(c0[0], c0[1]); ctx.lineTo(c1[0], c1[1]); ctx.lineTo(c2[0], c2[1]); ctx.stroke();
-    // moss spilling over the lip, ragged
-    ctx.fillStyle = '#4f8a2e';
+    // a seam down the face and a ledge across it
+    const u = 0.3 + 0.4 * hash2(i * 5 + si, j * 3);
+    const s0 = P(u, 0), s1 = P(u + 0.05, 1);
+    ctx.strokeStyle = 'rgba(25,24,28,0.45)';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.moveTo(s0[0], s0[1]); ctx.lineTo(s1[0], s1[1]); ctx.stroke();
+    ctx.fillStyle = hash2(i + si, j * 9) > 0.5 ? 'rgba(255,255,255,0.09)' : 'rgba(15,18,24,0.14)';
+    poly([P(0, 0), P(u, 0), P(u + 0.05, 1), P(0, 1)]);
+    ctx.fill();
+    const v = 0.3 + 0.4 * hash2(i * 5 + si, j * 17);
+    const l = P(0, v), r = P(1, v);
+    ctx.strokeStyle = 'rgba(20,20,24,0.28)';
+    ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(r[0], r[1]); ctx.stroke();
+    // moss clinging near the top
+    ctx.fillStyle = '#6f8a34';
     ctx.beginPath();
     ctx.moveTo(Ta[0], Ta[1]); ctx.lineTo(Tb[0], Tb[1]);
-    for (let k = 8; k >= 0; k--) { const u = k / 8; const q = P(u, 0.1 + 0.2 * hash2(x * 13 + k, y * 7 + si)); ctx.lineTo(q[0], q[1]); }
+    for (let k = 6; k >= 0; k--) { const q = P(k / 6, 0.03 + 0.2 * hash2(i * 13 + k, j * 7 + si) * (0.5 + hi)); ctx.lineTo(q[0], q[1]); }
     ctx.closePath(); ctx.fill();
-    // surf where the cliff meets the water
+    // surf where the rock meets the water
     if (!nh) {
-      const f0 = P(0, 0.9), f1 = P(1, 0.9);
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      const f0 = P(0, 0.88), f1 = P(1, 0.88);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
       poly([Ba, Bb, f1, f0]);
       ctx.fill();
     }
@@ -1374,47 +1378,40 @@ function drawBlock(x, y) {
     poly(quad);
     ctx.stroke();
   }
-  const T = [proj(x, y, h), proj(x + 1, y, h), proj(x + 1, y + 1, h), proj(x, y + 1, h)];
+  const T = [proj(x, y, h), proj(x + W, y, h), proj(x + W, y + W, h), proj(x, y + W, h)];
   // from straight above the cliff face is hinted by a dark lip on the far edges
   const flat = 1 - CAM.t;
   if (flat > 0.02) {
-    const dx = 0.07 * h * flat, dy = 0.1 * h * flat;
+    const dx = 0.035 * h * flat, dy = 0.05 * h * flat;
     ctx.fillStyle = 'rgba(55,45,38,0.9)';
-    poly([proj(x, y + 1, h), proj(x + 1, y + 1, h), proj(x + 1 + dx, y + 1 + dy, h), proj(x + dx, y + 1 + dy, h)]);
-    ctx.fill();
-    poly([proj(x + 1, y, h), proj(x + 1 + dx, y + dy, h), proj(x + 1 + dx, y + 1 + dy, h), proj(x + 1, y + 1, h)]);
-    ctx.fill();
+    if (!isWallSub(i, j + 1) || pillarH(i, j + 1) < h) { poly([proj(x, y + W, h), proj(x + W, y + W, h), proj(x + W + dx, y + W + dy, h), proj(x + dx, y + W + dy, h)]); ctx.fill(); }
+    if (!isWallSub(i + 1, j) || pillarH(i + 1, j) < h) { poly([proj(x + W, y, h), proj(x + W + dx, y + dy, h), proj(x + W + dx, y + W + dy, h), proj(x + W, y + W, h)]); ctx.fill(); }
   }
   const tg = ctx.createLinearGradient(T[0][0], T[0][1], T[2][0], T[2][1]);
   tg.addColorStop(0, topA); tg.addColorStop(1, topB);
   ctx.fillStyle = tg;
   poly(T);
   ctx.fill();
-  // sunlit rim on the near-left edges
-  ctx.strokeStyle = 'rgba(255,255,210,0.38)';
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(255,255,210,0.32)';
+  ctx.lineWidth = 1.2;
   ctx.beginPath(); ctx.moveTo(T[3][0], T[3][1]); ctx.lineTo(T[0][0], T[0][1]); ctx.lineTo(T[1][0], T[1][1]); ctx.stroke();
-  ctx.strokeStyle = 'rgba(40,70,25,0.45)';
+  ctx.strokeStyle = 'rgba(40,60,25,0.4)';
   ctx.lineWidth = 1;
   poly(T);
   ctx.stroke();
-  // mottled grass
-  for (let i = 0; i < 5; i++) {
-    const [px, py] = proj(x + 0.15 + 0.7 * hash2(x + i * 5, y * 3 + 1), y + 0.15 + 0.7 * hash2(x * 3 + 2, y + i * 7), h);
-    ctx.fillStyle = i % 2 ? 'rgba(40,84,28,0.3)' : 'rgba(210,235,120,0.28)';
-    ctx.beginPath(); ctx.arc(px, py, Math.max(2, CELL * (0.06 + 0.05 * hash2(i, x + y))), 0, TAU); ctx.fill();
+  // moss and scrub on top
+  for (let k = 0; k < 3; k++) {
+    const [px, py] = proj(x + W * (0.2 + 0.6 * hash2(i + k * 5, j * 3 + 1)), y + W * (0.2 + 0.6 * hash2(i * 3 + 2, j + k * 7)), h);
+    ctx.fillStyle = k % 2 ? 'rgba(40,84,28,0.35)' : 'rgba(205,230,120,0.3)';
+    ctx.beginPath(); ctx.arc(px, py, Math.max(1.5, CELL * (0.04 + 0.03 * hash2(k, i + j)) * CAM.zoom), 0, TAU); ctx.fill();
   }
-  // pines, and a boulder on the high ground
-  if (hv > 0.35) {
-    const n = hv > 0.8 ? 3 : hv > 0.6 ? 2 : 1;
-    for (let i = 0; i < n; i++) {
-      const [px, py] = proj(x + 0.25 + 0.5 * hash2(x + i, y * 9), y + 0.25 + 0.5 * hash2(x * 9 + i, y), h);
-      const sc = (0.75 + 0.5 * hash2(i + x, y)) * (hi > 0.6 ? 0.8 : 1);
-      const hgt = CELL * 0.62 * sc * (0.3 + 0.7 * CAM.t) * CAM.zoom, wd = CELL * 0.17 * sc * CAM.zoom;
-      if (CAM.t < 0.15) { ctx.fillStyle = '#2f5f2a'; ctx.beginPath(); ctx.arc(px, py, wd * 0.9, 0, TAU); ctx.fill(); continue; }
+  // a pine on some of the lower ground
+  if (hash2(i * 3 + 5, j * 7 + 2) > 0.74 && hi < 0.6) {
+    const [px, py] = proj(x + W / 2, y + W / 2, h);
+    const hgt = CELL * 0.6 * (0.3 + 0.7 * CAM.t) * CAM.zoom, wd = CELL * 0.15 * CAM.zoom;
+    if (CAM.t < 0.15) { ctx.fillStyle = '#2f5f2a'; ctx.beginPath(); ctx.arc(px, py, wd * 0.9, 0, TAU); ctx.fill(); }
+    else {
       ctx.globalAlpha = Math.min(1, CAM.t * 1.5);
-      ctx.fillStyle = 'rgba(20,40,20,0.3)';
-      ctx.beginPath(); ctx.ellipse(px + wd * 0.5, py + 1, wd * 1.3, wd * 0.45, 0, 0, TAU); ctx.fill();
       ctx.fillStyle = '#6b4a2e';
       ctx.fillRect(px - 1.2, py - hgt * 0.2, 2.4, hgt * 0.2);
       for (let L = 0; L < 3; L++) {
@@ -1426,11 +1423,6 @@ function drawBlock(x, y) {
       }
       ctx.globalAlpha = 1;
     }
-  } else {
-    const [px, py] = proj(x + 0.5, y + 0.5, h);
-    const r = CELL * 0.14 * CAM.zoom;
-    ctx.fillStyle = '#9a8f86'; ctx.beginPath(); ctx.ellipse(px, py, r * 1.3, r * 0.8, 0, 0, TAU); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.beginPath(); ctx.ellipse(px - r * 0.3, py - r * 0.25, r * 0.6, r * 0.3, 0, 0, TAU); ctx.fill();
   }
 }
 // a column of swirling air that throws a plane back
@@ -1566,7 +1558,7 @@ function seaImage() {
   const img = fg.createImageData(S, S);
   const land = [];
   for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (G.grid[y * N + x] === 1) land.push([x, y]);
-  const stops = [[0, [218, 202, 150]], [0.1, [192, 198, 152]], [0.3, [70, 172, 198]], [0.8, [50, 152, 200]], [1.8, [38, 120, 184]], [3.2, [27, 92, 158]]];
+  const stops = [[0, [224, 208, 158]], [0.3, [208, 196, 150]], [0.55, [104, 192, 198]], [1.1, [54, 156, 204]], [2.0, [38, 122, 186]], [3.2, [27, 92, 158]]];
   for (let py = 0; py < S; py++) {
     for (let px = 0; px < S; px++) {
       const cx = (px + 0.5) / R, cy = (py + 0.5) / R;
@@ -1576,9 +1568,10 @@ function seaImage() {
         const dd = dx * dx + dy * dy;
         if (dd < d * d) d = Math.sqrt(dd);
       }
+      const dn = d === 0 ? 0 : Math.max(0, d + (vnoise(cx * 1.3 + 9, cy * 1.3) - 0.5) * 0.5);
       let i = 0;
-      while (i < stops.length - 2 && d > stops[i + 1][0]) i++;
-      const t = clamp((d - stops[i][0]) / (stops[i + 1][0] - stops[i][0]), 0, 1), A = stops[i][1], B = stops[i + 1][1];
+      while (i < stops.length - 2 && dn > stops[i + 1][0]) i++;
+      const t = clamp((dn - stops[i][0]) / (stops[i + 1][0] - stops[i][0]), 0, 1), A = stops[i][1], B = stops[i + 1][1];
       const n = (vnoise(cx * 0.5, cy * 0.5) - 0.5) * 16 + (0.5 - (cx + cy) / (2 * N)) * 14;
       const o = (py * S + px) * 4;
       let foam = d < 0.22 ? Math.pow(1 - d / 0.22, 2) * (0.5 + 0.5 * Math.sin(d * 40 + vnoise(cx * 2, cy * 2) * 6)) * 0.32 : 0;
@@ -1612,6 +1605,16 @@ function seaImage() {
     g.moveTo(gx * CELL, gy * CELL); g.lineTo((gx + l) * CELL, (gy + 0.02) * CELL);
   }
   g.stroke();
+  // surf speckle and pebbles around the islands
+  for (const [lx, ly] of land) {
+    for (let k = 0; k < 14; k++) {
+      const a = hash2(lx * 31 + k, ly * 17) * TAU, r = 0.62 + 0.55 * hash2(lx + k * 3, ly * 5 + 1);
+      const px = lx + 0.5 + Math.cos(a) * r, py = ly + 0.5 + Math.sin(a) * r;
+      if (!inB(Math.floor(px), Math.floor(py)) || G.grid[Math.floor(py) * N + Math.floor(px)] === 1) continue;
+      if (k % 3 === 0) { g.fillStyle = 'rgba(96,92,90,0.85)'; g.beginPath(); g.ellipse(px * CELL, py * CELL, CELL * 0.05, CELL * 0.035, 0, 0, TAU); g.fill(); }
+      else { g.fillStyle = 'rgba(255,255,255,0.7)'; g.beginPath(); g.arc(px * CELL, py * CELL, CELL * 0.022, 0, TAU); g.fill(); }
+    }
+  }
   g.strokeStyle = ART.grid;
   g.lineWidth = 1;
   g.beginPath();
@@ -1858,7 +1861,7 @@ function draw() {
   for (let y = 0; y < N; y++) {
     for (let x = 0; x < N; x++) {
       const t = G.grid[y * N + x];
-      if (t === 1) objs.push({ d: depthOf(x + 0.5, y + 0.5), f: () => drawBlock(x, y) });
+      if (t === 1) for (let q = 0; q < 4; q++) { const pi = x * 2 + (q & 1), pj = y * 2 + (q >> 1); objs.push({ d: depthOf((pi + 0.5) / 2, (pj + 0.5) / 2) - 0.3, f: () => drawPillar(pi, pj) }); }
       else if (t === 2) objs.push({ d: depthOf(x + 0.5, y + 0.5), f: () => drawVortex(x, y, now) });
     }
   }
@@ -1883,32 +1886,35 @@ function draw() {
     } });
   }
   objs.sort((a, b) => a.d - b.d);
-  // vapour trails: the player's is long and white, the enemies' short and grey
-  if (G.tl && now > G.tl.t0 && now < G.tl.pathEnd + 0.9 && playing) {
-    const sp = 0.032 * Math.max(1, Math.pow(G.tl.k, 0.7));
-    for (let i = 24; i >= 1; i--) {
-      const tt = now - i * sp;
-      if (tt < G.tl.t0 || tt > G.tl.pathEnd + 0.02) continue;
-      const [tx, ty, tz] = trailPoint(tt);
-      const [sx, sy] = proj(tx, ty, tz);
-      ctx.globalAlpha = Math.pow(1 - i / 25, 1.3) * 0.85 * (0.45 + 0.55 * CAM.t);
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(sx, sy, CELL * CAM.zoom * (0.045 + 0.09 * (1 - i / 25)), 0, TAU);
-      ctx.fill();
+  // vapour trails: smooth tapering white ribbons behind every plane in flight
+  const ribbon = (pts, w0, a0) => {
+    ctx.lineCap = 'round';
+    for (let i = 1; i < pts.length; i++) {
+      const f = 1 - i / pts.length;
+      ctx.globalAlpha = a0 * Math.pow(f, 1.2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1, w0 * (0.25 + 0.75 * f));
+      ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
     }
+    ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
+  };
+  if (G.tl && now > G.tl.t0 && now < G.tl.pathEnd + 1.2 && playing) {
+    const sp = 0.028 * Math.max(1, Math.pow(G.tl.k, 0.7));
+    const pts = [];
+    for (let i = 0; i <= 36; i++) {
+      const tt = Math.min(now - i * sp, G.tl.pathEnd + 0.02);
+      if (tt < G.tl.t0) break;
+      const [tx, ty, tz] = trailPoint(tt);
+      pts.push(proj(tx, ty, tz));
+    }
+    if (pts.length > 1) ribbon(pts, CELL * CAM.zoom * 0.26, 0.95);
   }
   for (const j of jets) {
     if (!j.e || !j.moved) continue;
-    for (let i = 7; i >= 1; i--) {
-      const [qx, qy] = enemyPosAt(j.e, now - i * 0.045);
-      const [sx, sy] = proj(qx + 0.5, qy + 0.5, j.z);
-      ctx.globalAlpha = (1 - i / 8) * 0.4;
-      ctx.fillStyle = '#e9eef4';
-      ctx.beginPath(); ctx.arc(sx, sy, CELL * CAM.zoom * (0.03 + 0.04 * (1 - i / 8)), 0, TAU); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
+    const pts = [];
+    for (let i = 0; i <= 14; i++) { const [qx, qy] = enemyPosAt(j.e, now - i * 0.05); pts.push(proj(qx + 0.5, qy + 0.5, j.z)); }
+    ribbon(pts, CELL * CAM.zoom * 0.15, 0.8);
   }
   for (const o of objs) o.f();
   drawCubeFront(now);
