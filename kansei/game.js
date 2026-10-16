@@ -256,6 +256,32 @@ function simulate(ax, ay) {
   return { ax, ay, ex: x, ey: y, vx, vy, speed: n, path, kills, killSet, bounces, crash, clank, stomp };
 }
 
+// is there at least one move that lands outside every marked cell?
+function anySafe() {
+  for (let ay = -1; ay <= 1; ay++) {
+    for (let ax = -1; ax <= 1; ax++) {
+      const o = simulate(ax, ay);
+      if (!threatCells(o.killSet).has(o.ey * N + o.ex)) return true;
+    }
+  }
+  return false;
+}
+
+// Keep a way out. Mortars never close off every move; and right after a hit,
+// no enemy may, so hits can't follow one another unavoidably. Enemies that
+// would close it off hold their fire this turn (mortars first).
+function ensureEscape(justHit) {
+  if (anySafe()) return;
+  for (const t of justHit ? ['mortar', 'lancer', 'shell', 'spike'] : ['mortar']) {
+    for (const e of G.enemies) {
+      if (e.type !== t || !e.marks.length) continue;
+      e.marks = [];
+      e.aim = null;
+      if (anySafe()) return;
+    }
+  }
+}
+
 function threatCells(killSet) {
   const s = new Set();
   for (const e of G.enemies) {
@@ -487,6 +513,7 @@ function startFloor() {
     G.enemies.push(e);
   }
   for (const e of G.enemies) computeMarks(e);
+  ensureEscape(true);
   G.pendingClear = false;
   G.floorHurt = false;
   computeOptions();
@@ -670,6 +697,7 @@ function enemyPhase(t) {
 
   // 4. intentions
   for (const e of G.enemies) computeMarks(e);
+  ensureEscape(hurt);
 
   // 5. reinforcements
   const onBoard = G.enemies.length + G.spawns.length;
@@ -1001,6 +1029,14 @@ function draw() {
       ctx.lineWidth = 2;
       ctx.globalAlpha = isAct ? 1 : 0.8;
       const stops = !!(o.crash || o.clank);
+      // a dark backing so the marker stays readable on top of any threat mark
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = '#0b0e14';
+      ctx.beginPath();
+      ctx.arc(cx, cy, (o.ex === P.x && o.ey === P.y ? CELL * 0.42 : r) + 4, 0, TAU);
+      ctx.fill();
+      ctx.restore();
       ctx.beginPath();
       if (o.ex === P.x && o.ey === P.y) ctx.arc(cx, cy, CELL * 0.42, 0, TAU);
       else if (stops) ctx.rect(cx - r, cy - r, r * 2, r * 2);
