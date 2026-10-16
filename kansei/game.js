@@ -79,6 +79,27 @@ const Sfx = (() => {
     osc.start(t);
     osc.stop(t + dur + 0.05);
   }
+  // a rushing sound whose pitch rises, like a jet passing
+  function sweep(dur, o = {}) {
+    if (!ac) return;
+    const t = ac.currentTime + (o.delay || 0);
+    const src = ac.createBufferSource();
+    src.buffer = noiseBuf;
+    const f = ac.createBiquadFilter();
+    f.type = 'bandpass';
+    f.Q.value = 1.1;
+    f.frequency.setValueAtTime(o.from || 400, t);
+    f.frequency.exponentialRampToValueAtTime(o.to || 1800, t + dur);
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(o.vol || 0.08, t + dur * 0.45);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f);
+    f.connect(g);
+    g.connect(master);
+    src.start(t, Math.random() * 0.5);
+    src.stop(t + dur + 0.05);
+  }
   function noise(dur, o = {}) {
     if (!ac) return;
     const t = ac.currentTime + (o.delay || 0);
@@ -101,12 +122,20 @@ const Sfx = (() => {
   const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24, 26, 28, 31];
   return {
     ensure,
-    move(speed, delay) { noise(0.08 + speed * 0.03, { vol: 0.05 + speed * 0.015, freq: 500 + speed * 250, q: 0.8, delay }); },
+    move(speed, delay) { sweep(0.3 + speed * 0.04, { vol: 0.07 + speed * 0.012, from: 400, to: 1900, delay }); },
+    // a burst of cannon fire
+    gun(delay, dur) { const n = Math.max(3, Math.floor(dur / 0.04)); for (let i = 0; i < n; i++) noise(0.03, { vol: 0.07, freq: 1500 + (i % 2) * 500, q: 1.4, delay: delay + i * 0.04 }); },
+    // a downed plane's falling whistle
+    fall(delay, dur) { tone(1500, dur, { type: 'sawtooth', vol: 0.025, to: 140, delay }); sweep(dur, { vol: 0.06, from: 1800, to: 260, delay }); },
+    // the rush of a plane pulling up into a loop
+    sweepUp(delay, dur) { sweep(dur, { vol: 0.09, from: 260, to: 1500, delay }); },
+    boom(delay, vol) { noise(0.35, { vol: vol || 0.12, freq: 180, q: 0.6, delay }); tone(90, 0.3, { type: 'sine', vol: (vol || 0.12) * 0.9, to: 38, delay }); },
     kill(k, delay) {
       const f = 330 * Math.pow(2, SCALE[Math.min(k, SCALE.length - 1)] / 12);
-      tone(f, 0.22, { type: 'triangle', vol: 0.14, delay });
-      tone(f * 2, 0.12, { vol: 0.05, delay });
-      noise(0.1, { vol: 0.08, freq: 2500, delay });
+      // the cannon rounds land: a crack, and a clear note that climbs with each kill
+      noise(0.14, { vol: 0.12, freq: 2600, q: 0.8, delay });
+      tone(f, 0.3, { type: 'triangle', vol: 0.1, delay: delay + 0.02 });
+      tone(f * 2, 0.14, { vol: 0.04, delay: delay + 0.02 });
     },
     bounce(delay) { tone(620, 0.16, { vol: 0.1, to: 940, delay }); },
     crash(delay) { tone(110, 0.18, { type: 'square', vol: 0.06, to: 60, delay }); noise(0.12, { vol: 0.12, freq: 300, delay }); },
@@ -128,7 +157,7 @@ const G = {
   options: [], markers: [], hover: null, selected: null,
   // animation
   clock: 0, tl: null, path: null, oldMarks: [], deadAt: new Map(), corpses: [],
-  flashes: [], popups: [], particles: [], shake: 0, hurtT: -9, transT: -9, titleT: 0, bumpT: new Map(),
+  flashes: [], popups: [], particles: [], rings: [], lastPath: null, guns: [], maneuvers: [], shake: 0, hurtT: -9, transT: -9, titleT: 0, bumpT: new Map(),
 };
 try { G.best = parseInt(localStorage.getItem('kansei.best') || '0', 10) || 0; } catch (e) { /* ignore */ }
 
@@ -496,6 +525,7 @@ function placeSpawn(minDist) {
 // ============================================================ floors
 function startFloor() {
   G.grid = genArena(G.floor);
+  G.arenaId = (G.arenaId || 0) + 1;
   G.edgeBounce = G.floor >= 6 && rnd() < 0.35;
   const P = G.player;
   P.x = 5; P.y = 5; P.vx = 0; P.vy = 0;
@@ -533,6 +563,10 @@ function newRun() {
   G.popups = [];
   G.particles = [];
   G.flashes = [];
+  G.rings = [];
+  G.lastPath = null;
+  G.guns = [];
+  G.maneuvers = [];
   G.oldMarks = [];
   startFloor();
   G.transT = G.clock;
@@ -557,46 +591,89 @@ function floorDone() {
 }
 
 // ============================================================ turn
-const STEP_T = 0.065;
+// How fast the flight plays: three settings, saved between visits. 1 is slow, 3 is quick.
+const SPEEDS = [2.5, 1.7, 1.0];
+let speedIdx = 1;
+try { const v = parseInt(localStorage.getItem('kansei.speed') || '1', 10); if (v >= 0 && v <= 2) speedIdx = v; } catch (e) { /* ignore */ }
+function setSpeed(i) {
+  speedIdx = clamp(i, 0, 2);
+  try { localStorage.setItem('kansei.speed', String(speedIdx)); } catch (e) { /* ignore */ }
+}
+const gunTime = k => 0.3 * Math.pow(k, 0.8);     // a burst of fire before a kill
+const fallTime = k => 0.55 * Math.pow(k, 0.85);  // a downed plane's fall
 
 function commit(o) {
   if (!o || G.over || busy()) return;
   const P = G.player;
-  const now = G.clock;
+  const K = SPEEDS[speedIdx];
+  const STEP = 0.06 * K, LEAD = 0.28 * Math.sqrt(K), OUT = 0.3 * Math.sqrt(K);
+  const now = G.clock + LEAD;   // the flight begins once the camera has tilted
   G.oldMarks = G.enemies.map(e => ({ id: e.id, type: e.type, cells: e.marks.slice(), aim: e.aim }));
   G.deadAt = new Map();
   G.path = o.path;
-  const pathDur = Math.max(0.12, (o.path.length - 1) * STEP_T);
-  const enemyT = now + pathDur + 0.05;
-  G.tl = { t0: now, pathEnd: now + pathDur, enemyT, end: enemyT + 0.42 };
-  Sfx.move(o.speed, 0);
+  const pathDur = Math.max(0.12 * K, (o.path.length - 1) * STEP);
+  const enemyT = now + pathDur + 0.05 * K;
+  G.tl = { tStart: G.clock, t0: now, pathEnd: now + pathDur, enemyT, end: enemyT + 0.42 * K, step: STEP, lead: LEAD, out: OUT, k: K };
+  G.lastPath = { cells: o.path.map(p => [p.x, p.y]), t: now };
+  G.guns = [];
+  G.maneuvers = planManeuvers(o, now, STEP, !!(o.crash || o.clank));
+  Sfx.move(o.speed, LEAD);
   for (const b of o.bounces) {
     const idx = Math.max(1, o.path.findIndex(p => p.x === b.cx && p.y === b.cy));
-    const t = now + Math.max(0, idx) * STEP_T;
+    const t = now + Math.max(0, idx) * STEP;
     G.bumpT.set(b.cell[1] * N + b.cell[0], t);
-    Sfx.bounce(t - now);
+    G.rings.push({ x: b.cell[0] + 0.5, y: b.cell[1] + 0.5, t, life: 0.55, color: '#b4f2ff', r: 1.7 });
+    sparks(b.cell[0] + 0.5, b.cell[1] + 0.5, 0.6, t, '#d8f8ff', 9);
+    Sfx.bounce(t - G.clock);
   }
-  if (o.crash || o.clank) { Sfx.crash(pathDur); G.shakeAt = now + pathDur; G.shakeAmp = 4; }
+  if (o.crash || o.clank) { Sfx.crash(pathDur + LEAD); G.shakeAt = now + pathDur; G.shakeAmp = 4; }
+  for (const m of G.maneuvers) Sfx.sweepUp(m.tb - m.w - G.clock, m.w * 2.4);
 
   // kills
   const nk = o.kills.length + (o.stomp ? 1 : 0);
   if (nk > 0) G.streak = Math.min(9, G.streak + 1); else G.streak = 0;
   const mult = Math.max(1, G.streak);
+  let lastDown = 0;
   o.kills.forEach((k, i) => {
-    const t = now + k.step * STEP_T;
-    G.deadAt.set(k.e.id, t);
-    G.corpses.push({ type: k.e.type, x: k.e.x, y: k.e.y, t });
-    addScore(10 * (i + 1) * mult, k.e.x, k.e.y, t, i >= 1);
-    Sfx.kill(i, t - now);
-    burst(k.e.x, k.e.y, TYPES[k.e.type].color, t, 14 + i * 6);
+    const t = now + k.step * STEP;
+    const e = k.e;
+    const fall = fallTime(K);
+    G.deadAt.set(e.id, t);
+    // a burst of cannon fire, then the plane goes down trailing fire and crashes into the sea
+    const gd = gunTime(K);
+    G.guns.push({ x: e.x + 0.5, y: e.y + 0.5, z: enemyAlt(e.id), t0: t - gd, t1: t });
+    Sfx.gun(t - gd - G.clock, gd);
+    const hd = e.hd == null ? 0 : e.hd;
+    const drift = 1.6 + 0.6 * ((e.id * 7) % 3);
+    const landX = clamp(e.x + 0.5 + Math.cos(hd) * drift, 0.5, N - 0.5), landY = clamp(e.y + 0.5 + Math.sin(hd) * drift, 0.5, N - 0.5);
+    G.corpses.push({ type: e.type, x: e.x, y: e.y, hd, armor: e.armor, id: e.id, t, fall, lx: landX, ly: landY, spin: (e.id % 2 ? 1 : -1) * (9 + (e.id % 4)) });
+    addScore(10 * (i + 1) * mult, e.x, e.y, t, i >= 1);
+    Sfx.kill(i, t - G.clock);
+    sparks(e.x + 0.5, e.y + 0.5, enemyAlt(e.id), t, '#ffe28a', 10);
+    addP({ kind: 'fire', x: e.x + 0.5, y: e.y + 0.5, z: enemyAlt(e.id), vx: 0, vy: 0, vz: 0.2, t, life: 0.3, size: 0.6, core: true });
+    // fire and smoke along the way down
+    for (let q = 1; q <= 9; q++) {
+      const u = q / 10, tt = t + fall * u;
+      const [fx, fy, fz] = fallPos(e.x + 0.5, e.y + 0.5, enemyAlt(e.id), landX, landY, u);
+      addP({ kind: 'smoke', x: fx, y: fy, z: fz, vx: 0, vy: 0, vz: 0.15, t: tt, life: 0.9, size: 0.55 });
+      if (q % 2) addP({ kind: 'fire', x: fx, y: fy, z: fz, vx: 0, vy: 0, vz: 0.2, t: tt, life: 0.3, size: 0.4 });
+    }
+    // the impact
+    const tc = t + fall;
+    explode(landX, landY, 0.3, tc, 1.5 + 0.1 * i);
+    impact(landX, landY, tc, 1.6);
+    G.rings.push({ x: landX, y: landY, t: tc, life: 0.8, color: '#e8f6ff', r: 2.4 });
+    Sfx.fall(t - G.clock, fall);
+    Sfx.boom(tc - G.clock, 0.2);
+    lastDown = Math.max(lastDown, tc);
   });
   G.enemies = G.enemies.filter(e => !o.killSet.has(e));
   if (o.stomp) {
     G.spawns = G.spawns.filter(s => s !== o.stomp);
     const t = now + pathDur;
     addScore(10 * (o.kills.length + 1) * mult, o.stomp.x, o.stomp.y, t, false);
-    burst(o.stomp.x, o.stomp.y, '#ffffff', t, 10);
-    Sfx.kill(o.kills.length, pathDur);
+    explode(o.stomp.x + 0.5, o.stomp.y + 0.5, 0.4, t, 0.7);
+    Sfx.kill(o.kills.length, pathDur + LEAD);
   }
   G.killed += nk;
   if (nk >= 2) { G.shakeAt = now + pathDur; G.shakeAmp = Math.min(10, 2 + nk * 2); }
@@ -613,13 +690,16 @@ function commit(o) {
   G.markers = [];
   G.hover = null;
   G.selected = null;
+  // let a falling plane reach the sea before the camera comes back
+  G.tl.end = Math.max(G.tl.end, lastDown + 0.35 * K);
+  G.lastPath.endT = G.tl.end;
 }
 
 function clearFloor(t) {
   const bonus = 50 * G.floor;
   addScore(bonus, G.player.x, G.player.y, t, true);
   G.pendingClear = true;
-  G.tl.end = t + 0.9;
+  G.tl.end = t + 0.9 * Math.sqrt(G.tl.k);
   G.clearT = t;
   setTimeout(() => Sfx.clear(), Math.max(0, (t - G.clock) * 1000));
 }
@@ -633,6 +713,10 @@ function enemyPhase(t) {
   const friendly = new Set();
   for (const e of firing) {
     G.flashes.push({ cells: e.marks.slice(), color: TYPES[e.type].color, t });
+    e.marks.forEach(([mx, my], mi) => {
+      if (mi % (e.marks.length > 6 ? 2 : 1) === 0) impact(mx + 0.5, my + 0.5, t + 0.04 + 0.025 * (mi % 5), 0.55);
+    });
+    Sfx.boom(t - G.clock + 0.05, 0.07);
     for (const [x, y] of e.marks) {
       if (x === P.x && y === P.y) hurt = true;
       if (e.type === 'lancer' || e.type === 'mortar') {
@@ -648,9 +732,9 @@ function enemyPhase(t) {
   let fi = 0;
   for (const o of friendly) {
     G.deadAt.set(o.id, t + 0.08);
-    G.corpses.push({ type: o.type, x: o.x, y: o.y, t: t + 0.08 });
+    G.corpses.push({ type: o.type, x: o.x, y: o.y, hd: o.hd, armor: o.armor, id: o.id, t: t + 0.08, fall: 0.001 });
     addScore(10 * mult, o.x, o.y, t + 0.08, false);
-    burst(o.x, o.y, TYPES[o.type].color, t + 0.08, 12);
+    explode(o.x + 0.5, o.y + 0.5, 1.25, t + 0.08, 1);
     Sfx.kill(fi++, t + 0.08 - G.clock);
     G.killed++;
   }
@@ -662,6 +746,7 @@ function enemyPhase(t) {
     G.hurtT = t;
     G.shakeAt = t;
     G.shakeAmp = 9;
+    explode(P.x + 0.5, P.y + 0.5, 1.25, t + 0.04, P.hp <= 0 ? 1.7 : 1.1);
     Sfx.hurt(t - G.clock);
     if (P.hp <= 0) {
       G.over = true;
@@ -678,9 +763,10 @@ function enemyPhase(t) {
   for (const s of G.spawns) {
     if (s.due <= G.turn && freeCell(s.x, s.y)) {
       const e = makeEnemy(s.type, s.x, s.y);
-      e.bornT = t + 0.12;
+      e.bornT = t + 0.12 * G.tl.k;
+      e.arrive = true;
       G.enemies.push(e);
-      Sfx.spawn(t + 0.12 - G.clock);
+      Sfx.spawn(t + 0.12 * G.tl.k - G.clock);
     } else still.push(s);
   }
   G.spawns = still;
@@ -691,8 +777,18 @@ function enemyPhase(t) {
   for (const e of order) {
     e.fx = e.x; e.fy = e.y;
     moveEnemy(e, d);
-    e.mt0 = t + 0.12;
-    e.mt1 = t + 0.32;
+    e.mt0 = t + 0.12 * G.tl.k;
+    e.mt1 = t + 0.32 * G.tl.k;
+  }
+  // newcomers fly in from beyond the edge of the board
+  for (const e of G.enemies) {
+    if (!e.arrive) continue;
+    e.arrive = false;
+    const vx = e.x + 0.5 - N / 2, vy = e.y + 0.5 - N / 2, L = Math.hypot(vx, vy) || 1;
+    e.fx = e.x + (vx / L) * N * 0.8;
+    e.fy = e.y + (vy / L) * N * 0.8;
+    e.mt0 = e.bornT;
+    e.mt1 = e.bornT + 0.45 * G.tl.k;
   }
 
   // 4. intentions
@@ -710,12 +806,75 @@ function enemyPhase(t) {
 
 function busy() { return G.tl && G.clock < G.tl.end; }
 
-// ============================================================ fx
-function burst(x, y, color, t, n) {
-  for (let i = 0; i < n; i++) {
-    const a = rnd() * TAU, s = 1.5 + rnd() * 4;
-    G.particles.push({ x: x + 0.5, y: y + 0.5, vx: Math.cos(a) * s, vy: Math.sin(a) * s, t, life: 0.35 + rnd() * 0.35, color });
+// ============================================================ flight plans
+// Altitudes are in cells above the sea. The glass cube above the board is CUBE_H high.
+const CUBE_H = N;   // a true cube: as tall as the board is wide
+const enemyAlt = id => 3.0 + 0.9 * ((id * 5) % 4) / 3;      // 3.0 .. 3.9
+const playerAlt = 3.4;
+function fallPos(sx, sy, sz, lx, ly, u) {
+  const e = u * u;
+  return [sx + (lx - sx) * u, sy + (ly - sy) * u, sz * (1 - e) + 0.05];
+}
+// Where the flight turns back on itself, a fighter pulls an Immelmann turn: a half loop
+// up and over, then a half roll to level out facing the way it came.
+function planManeuvers(o, t0, step, crashed) {
+  const out = [];
+  const pts = o.path;
+  let prev = null, hPrev = null;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i].x - pts[i - 1].x, dy = pts[i].y - pts[i - 1].y;
+    if (!dx && !dy) continue;
+    const L = Math.hypot(dx, dy);
+    if (prev) {
+      const dot = (prev[0] * dx + prev[1] * dy) / (prev[2] * L);
+      if (dot < -0.6) out.push({ tb: t0 + (i - 1) * step, h0: hPrev, crash: false });
+    }
+    prev = [dx, dy, L];
+    hPrev = Math.atan2(dy, dx);
   }
+  if (crashed && prev) out.push({ tb: t0 + (pts.length - 1) * step, h0: hPrev, crash: true });
+  for (const m of out) m.w = clamp(2.2 * step, 0.22, 0.42);
+  // keep them apart
+  return out.filter((m, i) => i === 0 || m.tb - out[i - 1].tb > 4 * Math.max(m.w, out[i - 1].w));
+}
+
+// ============================================================ fx
+// Particles live in board coordinates (cells) plus an altitude, and are drawn as billboards.
+function addP(p) { G.particles.push(p); }
+
+// a plane blowing up in mid-air: fire, smoke, flying wreckage
+function explode(x, y, z, t, size) {
+  const sz = size || 1;
+  for (let i = 0; i < 5; i++) {
+    const a = rnd() * TAU, v = 0.5 + rnd() * 1.1;
+    addP({ kind: 'fire', x, y, z, vx: Math.cos(a) * v * 0.5, vy: Math.sin(a) * v * 0.5, vz: 0.3 + rnd() * 0.6, t: t + i * 0.015, life: 0.5 + rnd() * 0.3, size: sz * (0.55 + rnd() * 0.5) });
+  }
+  addP({ kind: 'fire', x, y, z, vx: 0, vy: 0, vz: 0, t, life: 0.35, size: sz * 1.25, core: true });
+  for (let i = 0; i < 5; i++) {
+    const a = rnd() * TAU, v = 0.3 + rnd() * 0.7;
+    addP({ kind: 'smoke', x, y, z, vx: Math.cos(a) * v * 0.6, vy: Math.sin(a) * v * 0.6, vz: 0.5 + rnd() * 0.5, t: t + 0.08 + i * 0.03, life: 0.9 + rnd() * 0.5, size: sz * (0.5 + rnd() * 0.4) });
+  }
+  for (let i = 0; i < 9; i++) {
+    const a = rnd() * TAU, v = 1.4 + rnd() * 2.8;
+    addP({ kind: 'debris', x, y, z, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vz: 1 + rnd() * 2.4, t, life: 0.55 + rnd() * 0.5, size: 0.7 + rnd() * 0.9, rot: rnd() * TAU, spin: (rnd() - 0.5) * 14, color: ['#d6403a', '#f4f7fb', '#3a4560', '#ffb03a'][i % 4] });
+  }
+  sparks(x, y, z, t, '#ffe28a', 8);
+  G.rings.push({ x, y, t, life: 0.5, color: '#fff3c0', r: 1.4 * sz });
+}
+
+function sparks(x, y, z, t, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd() * TAU, v = 1.5 + rnd() * 3;
+    addP({ kind: 'spark', x, y, z, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vz: (rnd() - 0.3) * 2, t, life: 0.25 + rnd() * 0.25, size: 1, color });
+  }
+}
+
+// a shell landing on the sea
+function impact(x, y, t, size) {
+  addP({ kind: 'fire', x, y, z: 0.15, vx: 0, vy: 0, vz: 0.5, t, life: 0.4, size: size * 0.8, core: true });
+  addP({ kind: 'smoke', x, y, z: 0.2, vx: 0, vy: 0, vz: 0.6, t: t + 0.05, life: 0.7, size: size * 0.6 });
+  addP({ kind: 'spray', x, y, z: 0.1, vx: 0, vy: 0, vz: 1.2, t, life: 0.45, size });
+  G.rings.push({ x, y, t, life: 0.4, color: '#ffd9a0', r: 0.6 * size });
 }
 
 // ============================================================ update
@@ -729,9 +888,15 @@ function update() {
   G.particles = G.particles.filter(p => G.clock < p.t + p.life);
   G.popups = G.popups.filter(p => G.clock < p.t + 1.0);
   G.flashes = G.flashes.filter(f => G.clock < f.t + 0.35);
+  G.rings = G.rings.filter(r => G.clock < r.t + r.life);
 }
 
 // ============================================================ draw
+// The board is shown two ways: straight down while you choose, and tilted like
+// a diorama while the move plays out. Ground-plane drawing (cells, marks,
+// paths) goes through one affine transform; things with height (islands,
+// aircraft, explosions) are projected point by point. At rest the transform is
+// the identity, so the overhead view is exactly the plain board.
 const X = x => OX + x * CELL, Y = y => OY + y * CELL;
 const CX = x => OX + (x + 0.5) * CELL, CY = y => OY + (y + 0.5) * CELL;
 
@@ -745,18 +910,319 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-function enemyPos(e) {
-  if (G.clock <= e.mt0) return [e.fx, e.fy];
-  if (G.clock >= e.mt1) return [e.x, e.y];
-  const k = (G.clock - e.mt0) / (e.mt1 - e.mt0);
+const SANS = 'ui-rounded, "Hiragino Maru Gothic ProN", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif';
+const ART = {
+  sea: ['#2f78ae', '#2b70a6'], seaBase: '#2a6a9e', sand: '#dccb9b', grid: 'rgba(176,220,248,0.34)',
+  moss: ['#7aa646', '#6f9a3a', '#83ad4b'], mossDark: '#5a8430', rock: '#93857a', rockDark: '#6f6359', rockLight: '#a9998c',
+  slab: '#18446f', slabDark: '#0e2c50', navy: '#0f2b4d', white: '#f6f9fc',
+  cyan: '#78e8ff', yellow: '#ffd93b', red: '#ff4a3d',
+};
+function hash2(a, b) {
+  let h = (a * 374761393 + b * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+const smooth = v => v * v * (3 - 2 * v);
+
+// ---------------------------------------------------------------- camera
+const ZOOM_ACT = 1.75, ZOOM_ENEMY = 1.4;
+const CAM = { fx: N / 2, fy: N / 2, zf: ZOOM_ACT, last: null, t: 0, sinP: 1, cosP: 0, c: 1, s: 0, zoom: 1, bx: 0, by: 0, bx0: 0, by0: 0, shx: 0, shy: 0 };
+const PITCH_DOWN = Math.PI / 2, PITCH_FLY = 0.62, YAW_FLY = -0.55, SLAB_D = 2.4;
+function updateCam(now) {
+  let t = 0;
+  const tl = G.tl;
+  if (tl) {
+    const up = clamp((now - tl.tStart) / tl.lead, 0, 1);
+    const dn = clamp((tl.end - now) / tl.out, 0, 1);
+    t = smooth(Math.min(up, dn));
+  }
+  CAM.t = t;
+  const phi = PITCH_DOWN + (PITCH_FLY - PITCH_DOWN) * t;
+  const yaw = YAW_FLY * t;
+  CAM.sinP = Math.sin(phi); CAM.cosP = Math.cos(phi);
+  CAM.c = Math.cos(yaw); CAM.s = Math.sin(yaw);
+  // close in on the action: follow the player's plane, then ease back to take in the enemy's reply
+  const spread = Math.cos(YAW_FLY) + Math.abs(Math.sin(YAW_FLY));
+  const fit = Math.min(1.06, (VW - 14) / (N * CELL * spread));
+  let tx = N / 2, ty = N / 2, zf = ZOOM_ACT;
+  if (tl) {
+    const [px, py] = playerPos(now);
+    const e = smooth(clamp((now - tl.pathEnd) / 0.35, 0, 1));
+    tx = px + 0.5 + (N / 2 - px - 0.5) * 0.45 * e;
+    ty = py + 0.5 + (N / 2 - py - 0.5) * 0.45 * e;
+    zf = ZOOM_ACT + (ZOOM_ENEMY - ZOOM_ACT) * e;
+  }
+  const dtc = Math.min(0.1, Math.max(0, now - (CAM.last == null ? now : CAM.last)));
+  CAM.last = now;
+  const k = t < 0.02 ? 1 : Math.min(1, dtc * 7);
+  CAM.fx += (tx - CAM.fx) * k; CAM.fy += (ty - CAM.fy) * k; CAM.zf += (zf - CAM.zf) * k;
+  CAM.zoom = 1 + (fit * CAM.zf - 1) * t;
+  CAM.bx0 = OX + N * CELL / 2;
+  CAM.by0 = OY + N * CELL / 2;
+  let shx = 0, shy = 0;
+  if (G.shakeAt != null) {
+    const k = now - G.shakeAt;
+    if (k >= 0 && k < 0.3) {
+      const amp = (G.shakeAmp || 6) * (1 - k / 0.3);
+      shx = (Math.random() - 0.5) * amp;
+      shy = (Math.random() - 0.5) * amp;
+    }
+  }
+  // put the followed point on the middle of the screen (below the HUD)
+  const half = Math.max(2.5, VW / (CELL * CAM.zoom) / 2 / spread);
+  const fx = clamp(CAM.fx, Math.min(half, N / 2), Math.max(N - half, N / 2)), fy = clamp(CAM.fy, 2.5, N - 2.5);
+  const uf = X(fx) - CAM.bx0, vf = Y(fy) - CAM.by0, z = CAM.zoom;
+  const bxF = VW / 2 - (uf * CAM.c - vf * CAM.s) * z;
+  const byF = (70 + VH - 14) / 2 + 0.06 * VH - (uf * CAM.s + vf * CAM.c) * CAM.sinP * z + 1.9 * CELL * CAM.cosP * z;
+  CAM.bx = CAM.bx0 + t * (bxF - CAM.bx0) + shx;
+  CAM.by = CAM.by0 + t * (byF - CAM.by0) + shy;
+}
+// board cell units (x, y, height in cells) -> screen pixels
+function proj(x, y, z) {
+  const u = X(x) - CAM.bx0, v = Y(y) - CAM.by0;
+  return [CAM.bx + (u * CAM.c - v * CAM.s) * CAM.zoom, CAM.by + (u * CAM.s + v * CAM.c) * CAM.sinP * CAM.zoom - z * CELL * CAM.cosP * CAM.zoom];
+}
+function depthOf(x, y) { return (X(x) - CAM.bx0) * CAM.s + (Y(y) - CAM.by0) * CAM.c; }
+function groundOn() {
+  const a = CAM.zoom * CAM.c, b = CAM.zoom * CAM.sinP * CAM.s, c = -CAM.zoom * CAM.s, d = CAM.zoom * CAM.sinP * CAM.c;
+  const e = CAM.bx - a * CAM.bx0 - c * CAM.by0, f = CAM.by - b * CAM.bx0 - d * CAM.by0;
+  ctx.setTransform(DPR * a, DPR * b, DPR * c, DPR * d, DPR * e, DPR * f);
+}
+function groundOff() { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); }
+function poly(pts) {
+  ctx.beginPath();
+  pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+  ctx.closePath();
+}
+function area(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p[0] * q[1] - q[0] * p[1]; }
+  return a;
+}
+
+// ---------------------------------------------------------------- sky, the cube, the base
+// the room around the diorama: pale, with the model's shadow on the table
+function drawRoom() {
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, '#f6f9fc'); g.addColorStop(1, '#d9e5f1');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, VW, VH);
+  if (CAM.t > 0.02) {
+    const [sx, sy] = proj(N / 2 + 0.5, N / 2 + 0.9, -SLAB_D - 0.05);
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.scale(1, 0.32);
+    const w = N * CELL * 0.82 * CAM.zoom;
+    const sg = ctx.createRadialGradient(0, 0, 0, 0, 0, w);
+    sg.addColorStop(0, `rgba(60,85,120,${0.3 * CAM.t})`);
+    sg.addColorStop(1, 'rgba(60,85,120,0)');
+    ctx.fillStyle = sg;
+    ctx.beginPath(); ctx.arc(0, 0, w, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+}
+const CUBE_FACES = [[[0, N], [N, N]], [[N, N], [N, 0]], [[N, 0], [0, 0]], [[0, 0], [0, N]]];  // south, east, north, west
+function cubeQuad(f) {
+  const [a, b] = f;
+  return [proj(a[0], a[1], 0), proj(b[0], b[1], 0), proj(b[0], b[1], CUBE_H), proj(a[0], a[1], CUBE_H)];
+}
+// the far walls of the glass cube: the sky seen from inside
+function drawCubeBack(now) {
+  if (CAM.t < 0.02) return;
+  ctx.globalAlpha = CAM.t;
+  CUBE_FACES.forEach((f, fi) => {
+    const q = cubeQuad(f);
+    if (area(q) <= 0.5) return;
+    const g = ctx.createLinearGradient(0, q[3][1], 0, q[0][1]);
+    g.addColorStop(0, '#3d8cdc'); g.addColorStop(0.55, '#79b8ee'); g.addColorStop(1, '#d4eafb');
+    ctx.fillStyle = g;
+    poly(q);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+// the near walls: clear glass, seen only by its edges and a faint sheen
+function drawCubeFront(now) {
+  if (CAM.t < 0.02) return;
+  ctx.globalAlpha = CAM.t;
+  const topPts = [[0, 0], [N, 0], [N, N], [0, N]].map(c => proj(c[0], c[1], CUBE_H));
+  CUBE_FACES.forEach((f) => {
+    const q = cubeQuad(f);
+    if (area(q) >= -0.5) return;
+    const g = ctx.createLinearGradient(q[3][0], q[3][1], q[1][0], q[1][1]);
+    g.addColorStop(0, 'rgba(255,255,255,0.0)');
+    g.addColorStop(0.5, 'rgba(255,255,255,0.1)');
+    g.addColorStop(1, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = g;
+    poly(q);
+    ctx.fill();
+  });
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 1.6;
+  poly(topPts);
+  ctx.stroke();
+  // the vertical edges, dashed like the drawing
+  ctx.setLineDash([6, 5]);
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  for (const [cx0, cy0] of [[0, 0], [N, 0], [N, N], [0, N]]) {
+    const a = proj(cx0, cy0, 0), b = proj(cx0, cy0, CUBE_H);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+}
+// the model's base, cut away: sea above, stone below
+function drawSlab() {
+  const D = SLAB_D;
+  const faces = [[[0, N], [N, N]], [[N, N], [N, 0]], [[N, 0], [0, 0]], [[0, 0], [0, N]]];
+  faces.forEach((f, fi) => {
+    const [a, b] = f;
+    const quad = [proj(a[0], a[1], 0), proj(b[0], b[1], 0), proj(b[0], b[1], -D), proj(a[0], a[1], -D)];
+    if (area(quad) <= 0.5) return;
+    const P = (u, v) => {
+      const tx = quad[0][0] + (quad[1][0] - quad[0][0]) * u, ty = quad[0][1] + (quad[1][1] - quad[0][1]) * u;
+      const bx = quad[3][0] + (quad[2][0] - quad[3][0]) * u, by = quad[3][1] + (quad[2][1] - quad[3][1]) * u;
+      return [tx + (bx - tx) * v, ty + (by - ty) * v];
+    };
+    // the sea, seen in section
+    const wg = ctx.createLinearGradient(0, quad[0][1], 0, quad[3][1]);
+    wg.addColorStop(0, '#6cc4e4'); wg.addColorStop(0.4, '#2f8cc4'); wg.addColorStop(1, '#0f4674');
+    ctx.fillStyle = wg;
+    poly(quad);
+    ctx.fill();
+    // stone columns standing in it, up to different heights
+    const cols = N * 2;
+    for (let i = 0; i < cols; i++) {
+      const u0 = i / cols, u1 = (i + 1) / cols;
+      const top = 0.42 + 0.5 * hash2(i * 3 + fi, 77 + fi) * (0.4 + 0.6 * hash2(Math.floor(i / 3), fi + 5));
+      const tone = 56 + Math.floor(hash2(i, fi + 9) * 26);
+      ctx.fillStyle = `rgb(${tone},${tone + 2},${tone + 8})`;
+      poly([P(u0, top), P(u1, top), P(u1, 1), P(u0, 1)]);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(15,20,32,0.55)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const p0 = P(u0, top), p1 = P(u0, 1);
+      ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]);
+      for (let r = top + 0.14; r < 0.98; r += 0.16) { const l = P(u0, r), rr = P(u1, r); ctx.moveTo(l[0], l[1]); ctx.lineTo(rr[0], rr[1]); }
+      ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(200,230,250,0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(quad[0][0], quad[0][1]); ctx.lineTo(quad[1][0], quad[1][1]);
+    ctx.stroke();
+  });
+}
+
+// ---------------------------------------------------------------- aircraft
+const JET = {
+  player: { L: 1.0, span: 0.46, W: 1.0, body: '#f6f9fc', wing: '#d9e4f0', accent: '#2f6fc0', canopy: '#27497f' },
+  spike: { L: 0.92, span: 0.4, W: 0.9, body: '#d6403a', wing: '#b02c30', accent: '#24305e', canopy: '#1b2447' },
+  shell: { L: 1.02, span: 0.5, W: 1.55, body: '#c53533', wing: '#992629', accent: '#24305e', canopy: '#1b2447', pips: true },
+  lancer: { L: 1.16, span: 0.32, W: 0.75, body: '#e04a36', wing: '#bb3a30', accent: '#ffb03a', canopy: '#1b2447' },
+  mortar: { L: 1.06, span: 0.6, W: 1.3, body: '#b8383f', wing: '#8f2a35', accent: '#d467d9', canopy: '#1b2447', sweep: 0.55 },
+};
+// the aircraft as flat panels, turned by heading, pitch (nose up) and roll (about its own axis)
+function jetPolys(sp, ox, oy, oz, hd, pitch, roll) {
+  const dx = Math.cos(hd), dy = Math.sin(hd), rx = -dy, ry = dx;
+  const cr = Math.cos(roll), sr = Math.sin(roll), cp = Math.cos(pitch), spn = Math.sin(pitch);
+  const T = (f, r, zz) => {
+    const z0 = zz || 0;
+    const r1 = r * cr - z0 * sr, z1 = r * sr + z0 * cr;
+    const f2 = f * cp - z1 * spn, z2 = f * spn + z1 * cp;
+    return [ox + f2 * dx + r1 * rx, oy + f2 * dy + r1 * ry, oz + z2];
+  };
+  const L = sp.L, W = sp.W, S = sp.span, sw = sp.sweep == null ? 1 : sp.sweep;
+  const out = [];
+  for (const g of [1, -1]) out.push({ c: sp.wing, p: [T(0.14 * L, 0.05 * g), T((-0.2 * sw - 0.02) * L, S * g), T(-0.32 * L, S * 0.9 * g), T(-0.26 * L, 0.05 * g)] });
+  for (const g of [1, -1]) out.push({ c: sp.wing, p: [T(-0.3 * L, 0.04 * g), T(-0.46 * L, S * 0.5 * g), T(-0.51 * L, S * 0.44 * g), T(-0.42 * L, 0.03 * g)] });
+  out.push({ c: sp.body, body: true, p: [T(0.52 * L, 0), T(0.24 * L, 0.075 * W), T(-0.3 * L, 0.07 * W), T(-0.46 * L, 0), T(-0.3 * L, -0.07 * W), T(0.24 * L, -0.075 * W)] });
+  for (const g of [1, -1]) out.push({ c: sp.accent, p: [T(-0.2 * L, S * 0.8 * g), T(-0.22 * L, S * g), T(-0.32 * L, S * 0.9 * g), T(-0.3 * L, S * 0.72 * g)] });
+  out.push({ c: sp.accent, fin: true, p: [T(-0.26 * L, 0, 0.02), T(-0.46 * L, 0, 0.02), T(-0.52 * L, 0, 0.27), T(-0.4 * L, 0, 0.28)] });
+  out.push({ c: sp.canopy, p: [T(0.3 * L, 0, 0.03), T(0.16 * L, 0.045 * W, 0.05), T(-0.06 * L, 0.04 * W, 0.04), T(-0.06 * L, -0.04 * W, 0.04), T(0.16 * L, -0.045 * W, 0.05)] });
+  return out;
+}
+function drawJet(j) {
+  const sp = JET[j.type];
+  const polys = jetPolys(sp, j.x, j.y, j.z, j.hd, j.pitch || 0, j.roll || 0);
+  ctx.globalAlpha = j.alpha == null ? 1 : j.alpha;
+  ctx.lineJoin = 'round';
+  // panels facing away from the viewer are drawn first, so a banked wing doesn't cover the body
+  for (const q of polys) {
+    const pts = q.p.map(p => proj(p[0], p[1], p[2]));
+    if (q.fin && CAM.cosP < 0.12) continue;
+    ctx.fillStyle = q.c;
+    poly(pts);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(10,28,58,0.55)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  if (sp.pips && !j.roll) {
+    const dx = Math.cos(j.hd), dy = Math.sin(j.hd), rx = -dy, ry = dx;
+    ctx.fillStyle = '#ffd93b';
+    for (let i = 0; i < (j.armor || 2); i++) {
+      for (const g of [1, -1]) {
+        const f = 0.0 - i * 0.12, r = g * (0.2 + i * 0.05);
+        const [sx, sy] = proj(j.x + f * dx + r * rx, j.y + f * dy + r * ry, j.z + 0.01);
+        ctx.beginPath(); ctx.arc(sx, sy, Math.max(1.6, CELL * 0.035), 0, TAU); ctx.fill();
+      }
+    }
+  }
+  // engine glow
+  const tail = jetPolys({ L: sp.L, span: 0, W: 0, sweep: 0 }, j.x, j.y, j.z, j.hd, j.pitch || 0, j.roll || 0)[4].p[3];
+  const [tx, ty] = proj(tail[0], tail[1], tail[2]);
+  ctx.fillStyle = j.type === 'player' ? 'rgba(140,220,255,0.9)' : 'rgba(255,170,90,0.9)';
+  ctx.beginPath(); ctx.arc(tx, ty, Math.max(1.8, CELL * 0.045), 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+// a darker copy of the plane laid on the sea
+function drawJetShadow(j) {
+  const sp = JET[j.type];
+  const off = j.z;
+  const polys = jetPolys(sp, j.x + off * 0.26, j.y + off * 0.38, 0, j.hd, 0, j.roll ? Math.min(0.5, Math.abs(j.roll)) : 0);
+  ctx.fillStyle = `rgba(8,30,66,${j.z > 2.6 ? 0.18 : 0.28})`;
+  for (const q of polys) {
+    if (q.fin) continue;
+    ctx.beginPath();
+    q.p.forEach((p, i) => (i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]))));
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+function miniJet(x, y, r, color, alpha) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x - r * 0.7, y - r * 0.8);
+  ctx.lineTo(x - r * 0.35, y);
+  ctx.lineTo(x - r * 0.7, y + r * 0.8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+let drawClock = 0;
+function turnTo(cur, target, k) {
+  let d = target - cur;
+  d = Math.atan2(Math.sin(d), Math.cos(d));
+  return cur + d * k;
+}
+function enemyPosAt(e, t) {
+  if (t <= e.mt0) return [e.fx, e.fy];
+  if (t >= e.mt1) return [e.x, e.y];
+  const k = (t - e.mt0) / (e.mt1 - e.mt0);
   const s = k * k * (3 - 2 * k);
   return [e.fx + (e.x - e.fx) * s, e.fy + (e.y - e.fy) * s];
 }
-
-function playerPos() {
+const enemyPos = e => enemyPosAt(e, G.clock);
+function playerPos(at) {
   const P = G.player;
-  if (G.path && G.tl && G.clock < G.tl.pathEnd) {
-    const f = Math.max(0, (G.clock - G.tl.t0) / STEP_T);
+  const t = at == null ? G.clock : at;
+  if (G.path && G.tl && t < G.tl.pathEnd) {
+    const f = Math.max(0, (t - G.tl.t0) / G.tl.step);
     const i = Math.min(G.path.length - 1, Math.floor(f));
     const j = Math.min(G.path.length - 1, i + 1);
     const k = f - i;
@@ -764,78 +1230,258 @@ function playerPos() {
   }
   return [P.x, P.y];
 }
-
-function drawEnemy(type, x, y, e, a, scale) {
-  const cx = CX(x), cy = CY(y), r = CELL * 0.34 * scale;
-  const col = TYPES[type].color;
-  ctx.globalAlpha = a;
-  ctx.lineWidth = Math.max(1.5, CELL * 0.05);
-  if (type === 'spike') {
-    ctx.fillStyle = '#3a0d16';
-    ctx.strokeStyle = col;
-    ctx.beginPath();
-    for (let i = 0; i < 16; i++) {
-      const ang = (i / 16) * TAU + G.clock * 0.6;
-      const rr = i % 2 ? r * 0.55 : r;
-      if (i) ctx.lineTo(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr); else ctx.moveTo(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr);
+const pilot = { hd: -Math.PI / 2, roll: 0, pitch: 0 };
+// altitude over the turn: a gentle arc, plus whatever the manoeuvres add
+function flightZ(now) {
+  const tl = G.tl;
+  if (!tl || now < tl.t0 || now > tl.pathEnd) return playerAlt;
+  const f = (now - tl.t0) / Math.max(0.05, tl.pathEnd - tl.t0);
+  return playerAlt + 0.35 * Math.sin(Math.PI * f);
+}
+// how the player's plane is turned and where it is at a moment: the Immelmann turns live here
+function playerPose(now, dtc) {
+  const [px, py] = playerPos(now);
+  let x = px + 0.5, y = py + 0.5, z = flightZ(now), hd = pilot.hd, pitch = 0, roll = 0, manoeuvre = false;
+  for (const m of G.maneuvers) {
+    const u0 = m.tb - m.w, u1 = m.tb + m.w, u2 = u1 + 2.4 * m.w;
+    if (now >= u0 && now <= u1) {
+      // half a loop: nose up, over the top
+      const u = (now - u0) / (2 * m.w);
+      hd = m.h0; pitch = Math.PI * u;
+      z += 0.62 * (1 - Math.cos(Math.PI * u));
+      if (m.crash) { x += Math.cos(m.h0) * 0.55 * Math.sin(Math.PI * u); y += Math.sin(m.h0) * 0.55 * Math.sin(Math.PI * u); }
+      manoeuvre = true;
+    } else if (now > u1 && now <= u2) {
+      // inverted, heading back: roll upright and settle down
+      const v = (now - u1) / (2.4 * m.w);
+      hd = m.h0 + Math.PI; pitch = 0;
+      const r = clamp(v / 0.75, 0, 1);
+      roll = Math.PI * (1 - r * r * (3 - 2 * r));
+      z += 1.24 * (1 - v * v * (3 - 2 * v));
+      if (m.crash) { x += Math.cos(m.h0) * 0.0; }
+      manoeuvre = true;
     }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  } else if (type === 'shell') {
-    ctx.fillStyle = '#2a3140';
-    ctx.strokeStyle = '#aab6cc';
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const ang = (i / 6) * TAU + Math.PI / 6;
-      if (i) ctx.lineTo(cx + Math.cos(ang) * r, cy + Math.sin(ang) * r); else ctx.moveTo(cx + Math.cos(ang) * r, cy + Math.sin(ang) * r);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    const arm = e ? e.armor : 2;
-    ctx.fillStyle = '#ffd34d';
-    for (let i = 0; i < arm; i++) {
-      const px = cx + (i - (arm - 1) / 2) * r * 0.5;
-      ctx.beginPath();
-      ctx.arc(px, cy, Math.max(1.8, r * 0.13), 0, TAU);
-      ctx.fill();
-    }
-  } else if (type === 'lancer') {
+    if (manoeuvre) { pilot.hd = hd; break; }
+  }
+  if (!manoeuvre) {
+    const [qx, qy] = playerPos(now - 0.03);
+    const moving = G.tl && now < G.tl.pathEnd && now > G.tl.t0 && Math.hypot(px - qx, py - qy) > 0.002;
     const P = G.player;
-    const aim = e && e.aim ? Math.atan2(e.aim[1], e.aim[0]) : Math.atan2(P.y - y, P.x - x);
-    ctx.fillStyle = '#3a2008';
-    ctx.strokeStyle = col;
-    ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(aim) * r * 1.1, cy + Math.sin(aim) * r * 1.1);
-    ctx.lineTo(cx + Math.cos(aim + 2.4) * r, cy + Math.sin(aim + 2.4) * r);
-    ctx.lineTo(cx + Math.cos(aim - 2.4) * r, cy + Math.sin(aim - 2.4) * r);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    if (e && e.aim) {
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r * 0.22, 0, TAU);
-      ctx.fill();
-    }
-  } else if (type === 'mortar') {
-    ctx.fillStyle = '#2c0f38';
-    ctx.strokeStyle = col;
-    roundRect(cx - r, cy - r, r * 2, r * 2, r * 0.3);
-    ctx.fill();
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.45, 0, TAU);
-    ctx.stroke();
-    if (e && e.aim) {
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r * 0.22, 0, TAU);
-      ctx.fill();
+    let target = null;
+    if (moving) target = Math.atan2(py - qy, px - qx);
+    else if (P.vx || P.vy) target = Math.atan2(P.vy, P.vx);
+    if (target != null) {
+      const before = pilot.hd;
+      pilot.hd = turnTo(pilot.hd, target, Math.min(1, dtc * 12));
+      const rate = Math.atan2(Math.sin(pilot.hd - before), Math.cos(pilot.hd - before)) / Math.max(dtc, 0.001);
+      pilot.roll += (clamp(rate * 0.2, -1.0, 1.0) - pilot.roll) * Math.min(1, dtc * 10);
+    } else pilot.roll += (0 - pilot.roll) * Math.min(1, dtc * 8);
+    hd = pilot.hd; roll = pilot.roll;
+  }
+  return { x, y, z, hd, pitch, roll };
+}
+
+// where the player's plane was, for the vapour trail (no side effects)
+function trailPoint(t) {
+  const [px, py] = playerPos(t);
+  let x = px + 0.5, y = py + 0.5, z = flightZ(t);
+  for (const m of G.maneuvers) {
+    const u0 = m.tb - m.w, u1 = m.tb + m.w, u2 = u1 + 2.4 * m.w;
+    if (t >= u0 && t <= u1) {
+      const u = (t - u0) / (2 * m.w);
+      z += 0.62 * (1 - Math.cos(Math.PI * u));
+      if (m.crash) { x += Math.cos(m.h0) * 0.55 * Math.sin(Math.PI * u); y += Math.sin(m.h0) * 0.55 * Math.sin(Math.PI * u); }
+    } else if (t > u1 && t <= u2) {
+      const v = (t - u1) / (2.4 * m.w);
+      z += 1.24 * (1 - v * v * (3 - 2 * v));
     }
   }
-  ctx.globalAlpha = 1;
+  return [x, y, z];
+}
+
+// ---------------------------------------------------------------- terrain
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), fx = smooth(x - xi), fy = smooth(y - yi);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+// neighbouring islands rise and fall together, like hills
+function wallHeight(x, y) { return 0.55 + 1.35 * Math.pow(vnoise(x * 0.62 + 3.1, y * 0.62 + 7.7), 1.15); }
+const isWall = (x, y) => inB(x, y) && cellType(x, y) === 1;
+function rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function mixc(a, b, t) { const A = rgb(a), B = typeof b === 'string' ? rgb(b) : b; return `rgb(${Math.round(A[0] + (B[0] - A[0]) * t)},${Math.round(A[1] + (B[1] - A[1]) * t)},${Math.round(A[2] + (B[2] - A[2]) * t)})`; }
+// each island cell is four rock pillars of different heights, so the coast reads as craggy stone
+const pillarH = (i, j) => wallHeight(i >> 1, j >> 1) * (0.4 + 0.75 * Math.pow(hash2(i * 7 + 3, j * 5 + 1), 1.3));
+const isWallSub = (i, j) => isWall(i >> 1, j >> 1);
+function drawPillar(i, j) {
+  const W = 0.5, x = i * W, y = j * W;
+  const cx = i >> 1, cy = j >> 1;
+  const h = pillarH(i, j);
+  const hv = hash2(cx * 7 + 1, cy * 5 + 9);
+  const hi = clamp((wallHeight(cx, cy) - 0.55) / 1.35, 0, 1);
+  const topA = mixc('#8aa24a', '#a3a98a', hi * 0.7);
+  const topB = mixc('#65823a', '#7d8466', hi * 0.7);
+  const sides = [
+    [[x, y + W], [x + W, y + W], '#9d9a96', 0, 1],
+    [[x + W, y + W], [x + W, y], '#76726f', 1, 0],
+    [[x + W, y], [x, y], '#625f5e', 0, -1],
+    [[x, y], [x, y + W], '#86827d', -1, 0],
+  ];
+  for (let si = 0; si < 4; si++) {
+    const [a, b, col, nx, ny] = sides[si];
+    const nh = isWallSub(i + nx, j + ny) ? pillarH(i + nx, j + ny) : 0;
+    if (nh >= h) continue;
+    const Ba = proj(a[0], a[1], nh), Bb = proj(b[0], b[1], nh), Tb = proj(b[0], b[1], h), Ta = proj(a[0], a[1], h);
+    const quad = [Ba, Bb, Tb, Ta];
+    if (area(quad) >= -0.5) continue;
+    const mx = (Ta[0] + Tb[0]) / 2, my = (Ta[1] + Tb[1]) / 2, bx = (Ba[0] + Bb[0]) / 2, by = (Ba[1] + Bb[1]) / 2;
+    const gr = ctx.createLinearGradient(mx, my, bx, by);
+    gr.addColorStop(0, mixc(col, '#ffffff', 0.2));
+    gr.addColorStop(0.5, col);
+    gr.addColorStop(1, mixc(col, '#2c3a4a', nh ? 0.25 : 0.5));
+    ctx.fillStyle = gr;
+    poly(quad);
+    ctx.fill();
+    const P = (u, v) => { const tx = Ta[0] + (Tb[0] - Ta[0]) * u, ty = Ta[1] + (Tb[1] - Ta[1]) * u; return [tx + ((Ba[0] + (Bb[0] - Ba[0]) * u) - tx) * v, ty + ((Ba[1] + (Bb[1] - Ba[1]) * u) - ty) * v]; };
+    ctx.save();
+    poly(quad);
+    ctx.clip();
+    // a seam down the face and a ledge across it
+    const u = 0.3 + 0.4 * hash2(i * 5 + si, j * 3);
+    const s0 = P(u, 0), s1 = P(u + 0.05, 1);
+    ctx.strokeStyle = 'rgba(25,24,28,0.45)';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.moveTo(s0[0], s0[1]); ctx.lineTo(s1[0], s1[1]); ctx.stroke();
+    ctx.fillStyle = hash2(i + si, j * 9) > 0.5 ? 'rgba(255,255,255,0.09)' : 'rgba(15,18,24,0.14)';
+    poly([P(0, 0), P(u, 0), P(u + 0.05, 1), P(0, 1)]);
+    ctx.fill();
+    const v = 0.3 + 0.4 * hash2(i * 5 + si, j * 17);
+    const l = P(0, v), r = P(1, v);
+    ctx.strokeStyle = 'rgba(20,20,24,0.28)';
+    ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(r[0], r[1]); ctx.stroke();
+    // moss clinging near the top
+    ctx.fillStyle = '#6f8a34';
+    ctx.beginPath();
+    ctx.moveTo(Ta[0], Ta[1]); ctx.lineTo(Tb[0], Tb[1]);
+    for (let k = 6; k >= 0; k--) { const q = P(k / 6, 0.03 + 0.2 * hash2(i * 13 + k, j * 7 + si) * (0.5 + hi)); ctx.lineTo(q[0], q[1]); }
+    ctx.closePath(); ctx.fill();
+    // surf where the rock meets the water
+    if (!nh) {
+      const f0 = P(0, 0.88), f1 = P(1, 0.88);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      poly([Ba, Bb, f1, f0]);
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(35,26,22,0.4)';
+    ctx.lineWidth = 1;
+    poly(quad);
+    ctx.stroke();
+  }
+  const T = [proj(x, y, h), proj(x + W, y, h), proj(x + W, y + W, h), proj(x, y + W, h)];
+  // from straight above the cliff face is hinted by a dark lip on the far edges
+  const flat = 1 - CAM.t;
+  if (flat > 0.02) {
+    const dx = 0.035 * h * flat, dy = 0.05 * h * flat;
+    ctx.fillStyle = 'rgba(55,45,38,0.9)';
+    if (!isWallSub(i, j + 1) || pillarH(i, j + 1) < h) { poly([proj(x, y + W, h), proj(x + W, y + W, h), proj(x + W + dx, y + W + dy, h), proj(x + dx, y + W + dy, h)]); ctx.fill(); }
+    if (!isWallSub(i + 1, j) || pillarH(i + 1, j) < h) { poly([proj(x + W, y, h), proj(x + W + dx, y + dy, h), proj(x + W + dx, y + W + dy, h), proj(x + W, y + W, h)]); ctx.fill(); }
+  }
+  const tg = ctx.createLinearGradient(T[0][0], T[0][1], T[2][0], T[2][1]);
+  tg.addColorStop(0, topA); tg.addColorStop(1, topB);
+  ctx.fillStyle = tg;
+  poly(T);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,210,0.32)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(T[3][0], T[3][1]); ctx.lineTo(T[0][0], T[0][1]); ctx.lineTo(T[1][0], T[1][1]); ctx.stroke();
+  ctx.strokeStyle = 'rgba(40,60,25,0.4)';
+  ctx.lineWidth = 1;
+  poly(T);
+  ctx.stroke();
+  // moss and scrub on top
+  for (let k = 0; k < 3; k++) {
+    const [px, py] = proj(x + W * (0.2 + 0.6 * hash2(i + k * 5, j * 3 + 1)), y + W * (0.2 + 0.6 * hash2(i * 3 + 2, j + k * 7)), h);
+    ctx.fillStyle = k % 2 ? 'rgba(40,84,28,0.35)' : 'rgba(205,230,120,0.3)';
+    ctx.beginPath(); ctx.arc(px, py, Math.max(1.5, CELL * (0.04 + 0.03 * hash2(k, i + j)) * CAM.zoom), 0, TAU); ctx.fill();
+  }
+  // a pine on some of the lower ground
+  if (hash2(i * 3 + 5, j * 7 + 2) > 0.74 && hi < 0.6) {
+    const [px, py] = proj(x + W / 2, y + W / 2, h);
+    const hgt = CELL * 0.6 * (0.3 + 0.7 * CAM.t) * CAM.zoom, wd = CELL * 0.15 * CAM.zoom;
+    if (CAM.t < 0.15) { ctx.fillStyle = '#2f5f2a'; ctx.beginPath(); ctx.arc(px, py, wd * 0.9, 0, TAU); ctx.fill(); }
+    else {
+      ctx.globalAlpha = Math.min(1, CAM.t * 1.5);
+      ctx.fillStyle = '#6b4a2e';
+      ctx.fillRect(px - 1.2, py - hgt * 0.2, 2.4, hgt * 0.2);
+      for (let L = 0; L < 3; L++) {
+        const yb = py - hgt * (0.12 + 0.28 * L), yt = py - hgt * (0.55 + 0.22 * L), w = wd * (1.35 - 0.3 * L);
+        ctx.fillStyle = mixc('#2c6a30', '#58a04a', L / 2.5);
+        ctx.beginPath(); ctx.moveTo(px, yt - hgt * 0.1); ctx.lineTo(px + w, yb); ctx.lineTo(px - w, yb); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = 'rgba(0,30,10,0.28)';
+        ctx.beginPath(); ctx.moveTo(px, yt - hgt * 0.1); ctx.lineTo(px + w, yb); ctx.lineTo(px, yb); ctx.closePath(); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+// a column of swirling air that throws a plane back
+function drawVortex(x, y, now) {
+  const bt = G.bumpT.get(y * N + x);
+  const glow = bt != null && now >= bt && now - bt < 0.5 ? 1 - (now - bt) / 0.5 : 0;
+  const cx = x + 0.5, cy = y + 0.5, H = 1.1;
+  const rBase = CELL * 0.26 * CAM.zoom, rTop = CELL * 0.4 * CAM.zoom;
+  const [bx, by] = proj(cx, cy, 0.04), [tx, ty] = proj(cx, cy, H);
+  // the column
+  ctx.fillStyle = `rgba(150,230,255,${0.2 + 0.25 * glow})`;
+  ctx.beginPath();
+  ctx.moveTo(bx - rBase, by);
+  ctx.lineTo(tx - rTop, ty);
+  ctx.ellipse(tx, ty, rTop, rTop * CAM.sinP, 0, Math.PI, 0, true);
+  ctx.lineTo(bx + rBase, by);
+  ctx.ellipse(bx, by, rBase, rBase * CAM.sinP, 0, 0, Math.PI, false);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = `rgba(215,248,255,${0.55 + 0.4 * glow})`;
+  ctx.lineWidth = 1.6 + glow * 2;
+  ctx.beginPath(); ctx.ellipse(bx, by, rBase, rBase * CAM.sinP, 0, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(tx, ty, rTop, rTop * CAM.sinP, 0, 0, TAU); ctx.stroke();
+  // two streams winding up it
+  ctx.lineWidth = 1.8;
+  ctx.strokeStyle = `rgba(255,255,255,${0.7 + 0.3 * glow})`;
+  for (let j = 0; j < 2; j++) {
+    ctx.beginPath();
+    for (let i = 0; i <= 16; i++) {
+      const u = i / 16, ang = now * 3.2 + j * Math.PI + u * 6.5, rr = (0.2 + 0.14 * u);
+      const [px, py] = proj(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr, 0.04 + u * (H - 0.04));
+      if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+  }
+}
+// the edge of the board throws planes back when the walls are up
+function windWall(a, b, now) {
+  const H = 1.2;
+  const quad = [proj(a[0], a[1], 0), proj(b[0], b[1], 0), proj(b[0], b[1], H), proj(a[0], a[1], H)];
+  const gr = ctx.createLinearGradient(0, quad[3][1], 0, quad[0][1]);
+  gr.addColorStop(0, 'rgba(180,240,255,0.04)');
+  gr.addColorStop(1, 'rgba(120,225,255,0.3)');
+  ctx.fillStyle = gr;
+  poly(quad);
+  ctx.fill();
+  ctx.strokeStyle = `rgba(210,248,255,${0.6 + 0.25 * Math.sin(now * 2.6)})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(quad[3][0], quad[3][1]); ctx.lineTo(quad[2][0], quad[2][1]);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(210,248,255,0.28)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 6; i++) {
+    const u = ((i / 6) + now * 0.15) % 1;
+    const p = [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+    const bb = proj(p[0], p[1], 0), tt = proj(p[0], p[1], H);
+    ctx.beginPath(); ctx.moveTo(bb[0], bb[1]); ctx.lineTo(tt[0], tt[1]); ctx.stroke();
+  }
 }
 
 function drawMarks(cells, type, a, aim) {
@@ -895,59 +1541,190 @@ function drawMarks(cells, type, a, aim) {
   ctx.globalAlpha = 1;
 }
 
+// the sea, the shallows, the grid and the islands' shadows never change within an area: draw them once
+let seaCache = null;
+function seaImage() {
+  const key = G.arenaId + '|' + CELL + '|' + DPR;
+  if (seaCache && seaCache.key === key) return seaCache.c;
+  const W = Math.round(CELL * N * DPR);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = W;
+  const g = c.getContext('2d');
+  // depth field: shallow turquoise and sand near land, deepening to open water, with broad swells of colour
+  const R = 10, S = N * R;
+  const f = document.createElement('canvas');
+  f.width = S; f.height = S;
+  const fg = f.getContext('2d');
+  const img = fg.createImageData(S, S);
+  const land = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (G.grid[y * N + x] === 1) land.push([x, y]);
+  const stops = [[0, [224, 208, 158]], [0.3, [208, 196, 150]], [0.55, [104, 192, 198]], [1.1, [54, 156, 204]], [2.0, [38, 122, 186]], [3.2, [27, 92, 158]]];
+  for (let py = 0; py < S; py++) {
+    for (let px = 0; px < S; px++) {
+      const cx = (px + 0.5) / R, cy = (py + 0.5) / R;
+      let d = 9;
+      for (const [lx, ly] of land) {
+        const dx = Math.max(lx - cx, 0, cx - lx - 1), dy = Math.max(ly - cy, 0, cy - ly - 1);
+        const dd = dx * dx + dy * dy;
+        if (dd < d * d) d = Math.sqrt(dd);
+      }
+      const dn = d === 0 ? 0 : Math.max(0, d + (vnoise(cx * 1.3 + 9, cy * 1.3) - 0.5) * 0.5);
+      let i = 0;
+      while (i < stops.length - 2 && dn > stops[i + 1][0]) i++;
+      const t = clamp((dn - stops[i][0]) / (stops[i + 1][0] - stops[i][0]), 0, 1), A = stops[i][1], B = stops[i + 1][1];
+      const n = (vnoise(cx * 0.5, cy * 0.5) - 0.5) * 16 + (0.5 - (cx + cy) / (2 * N)) * 14;
+      const o = (py * S + px) * 4;
+      let foam = d < 0.22 ? Math.pow(1 - d / 0.22, 2) * (0.5 + 0.5 * Math.sin(d * 40 + vnoise(cx * 2, cy * 2) * 6)) * 0.32 : 0;
+      for (let k = 0; k < 3; k++) {
+        const v = A[k] + (B[k] - A[k]) * t + n * (d > 0.3 ? 1 : 0.2);
+        img.data[o + k] = clamp(v + (255 - v) * foam, 0, 255);
+      }
+      img.data[o + 3] = 255;
+    }
+  }
+  fg.putImageData(img, 0, 0);
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(f, 0, 0, W, W);
+  g.scale(DPR, DPR);
+  // the water's own light: soft diagonal bands and glints
+  g.globalAlpha = 0.07;
+  g.fillStyle = '#ffffff';
+  for (let k = -N; k < N * 2; k += 3) {
+    g.beginPath(); g.moveTo(k * CELL, 0); g.lineTo((k + 1.2) * CELL, 0); g.lineTo((k + 1.2 - N) * CELL, N * CELL); g.lineTo((k - N) * CELL, N * CELL); g.closePath(); g.fill();
+  }
+  g.globalAlpha = 1;
+  g.strokeStyle = 'rgba(255,255,255,0.2)';
+  g.lineWidth = 1.2;
+  g.lineCap = 'round';
+  g.beginPath();
+  for (let i = 0; i < N * N * 0.7; i++) {
+    const gx = hash2(i, 101) * N, gy = hash2(i, 102) * N;
+    if (G.grid[Math.floor(gy) * N + Math.floor(gx)] === 1) continue;
+    const l = 0.18 + 0.22 * hash2(i, 103);
+    g.moveTo(gx * CELL, gy * CELL); g.lineTo((gx + l) * CELL, (gy + 0.02) * CELL);
+  }
+  g.stroke();
+  // surf speckle and pebbles around the islands
+  for (const [lx, ly] of land) {
+    for (let k = 0; k < 14; k++) {
+      const a = hash2(lx * 31 + k, ly * 17) * TAU, r = 0.62 + 0.55 * hash2(lx + k * 3, ly * 5 + 1);
+      const px = lx + 0.5 + Math.cos(a) * r, py = ly + 0.5 + Math.sin(a) * r;
+      if (!inB(Math.floor(px), Math.floor(py)) || G.grid[Math.floor(py) * N + Math.floor(px)] === 1) continue;
+      if (k % 3 === 0) { g.fillStyle = 'rgba(96,92,90,0.85)'; g.beginPath(); g.ellipse(px * CELL, py * CELL, CELL * 0.05, CELL * 0.035, 0, 0, TAU); g.fill(); }
+      else { g.fillStyle = 'rgba(255,255,255,0.7)'; g.beginPath(); g.arc(px * CELL, py * CELL, CELL * 0.022, 0, TAU); g.fill(); }
+    }
+  }
+  g.strokeStyle = ART.grid;
+  g.lineWidth = 1;
+  g.beginPath();
+  for (let i = 0; i <= N; i++) { g.moveTo(i * CELL, 0); g.lineTo(i * CELL, N * CELL); g.moveTo(0, i * CELL); g.lineTo(N * CELL, i * CELL); }
+  g.stroke();
+  // each island throws a soft shadow across the water
+  for (let pass = 0; pass < 3; pass++) {
+    g.fillStyle = `rgba(6,28,60,${0.1 - pass * 0.02})`;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      if (G.grid[y * N + x] !== 1) continue;
+      const h = wallHeight(x, y), k = 0.55 + pass * 0.22;
+      g.fillRect((x + h * 0.4 * k) * CELL, (y + h * 0.32 * k) * CELL, CELL, CELL);
+    }
+  }
+  seaCache = { key, c };
+  return c;
+}
+
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = '#0b0e14';
-  ctx.fillRect(0, 0, VW, VH);
-  if (!G.player) return;
+  if (!G.player) { ctx.fillStyle = '#8fc9f3'; ctx.fillRect(0, 0, VW, VH); return; }
   const now = G.clock;
+  const dtc = Math.min(0.1, Math.max(0, now - drawClock));
+  drawClock = now;
+  updateCam(now);
+  drawRoom();
+  drawSlab();
+  drawCubeBack(now);
 
-  // shake
-  let sx = 0, sy = 0;
-  if (G.shakeAt != null) {
-    const k = now - G.shakeAt;
-    if (k >= 0 && k < 0.3) {
-      const amp = (G.shakeAmp || 6) * (1 - k / 0.3);
-      sx = (Math.random() - 0.5) * amp;
-      sy = (Math.random() - 0.5) * amp;
+  const P = G.player;
+  const playing = !G.over || now < G.overT - 0.4;
+
+  // ---- who is where
+  const jets = [];
+  for (const e of G.enemies) {
+    if (now < e.bornT) continue;
+    const [x, y] = enemyPos(e);
+    const [px, py] = enemyPosAt(e, now - 0.04);
+    const moved = Math.hypot(x - px, y - py) > 0.004;
+    let target;
+    if (moved) target = Math.atan2(y - py, x - px);
+    else if (e.type === 'lancer' && e.aim) target = Math.atan2(e.aim[1], e.aim[0]);
+    else target = Math.atan2(P.y - y, P.x - x);
+    const before = e.hd == null ? target : e.hd;
+    e.hd = e.hd == null ? target : turnTo(e.hd, target, Math.min(1, dtc * 10));
+    const rate = Math.atan2(Math.sin(e.hd - before), Math.cos(e.hd - before)) / Math.max(dtc, 0.001);
+    e.roll = (e.roll || 0) + (clamp(rate * 0.18, -0.9, 0.9) - (e.roll || 0)) * Math.min(1, dtc * 8);
+    jets.push({ type: e.type, x: x + 0.5, y: y + 0.5, z: enemyAlt(e.id) + 0.06 * Math.sin(now * 2 + e.id), hd: e.hd, roll: e.roll, pitch: 0, armor: e.armor, e, moved, fromX: px + 0.5, fromY: py + 0.5 });
+  }
+  for (const c of G.corpses) {
+    if (now < c.t) {
+      jets.push({ type: c.type, x: c.x + 0.5, y: c.y + 0.5, z: enemyAlt(c.id || 0), hd: c.hd == null ? 0 : c.hd, armor: c.armor, pitch: 0, roll: 0 });
+    } else if (now < c.t + c.fall) {
+      // shot down: it rolls, drops its nose, and falls trailing fire
+      const u = (now - c.t) / c.fall;
+      const [fx, fy, fz] = fallPos(c.x + 0.5, c.y + 0.5, enemyAlt(c.id || 0), c.lx, c.ly, u);
+      jets.push({ type: c.type, x: fx, y: fy, z: fz, hd: (c.hd || 0) + c.spin * u * u * 0.25, pitch: -0.2 - 0.9 * Math.min(1, u * 1.6), roll: c.spin * u * 1.4, armor: c.armor, falling: true });
     }
   }
-  ctx.save();
-  ctx.translate(sx, sy);
+  let pj = null;
+  if (playing) {
+    pj = Object.assign({ type: 'player' }, playerPose(now, dtc));
+    jets.push(pj);
+  }
 
-  // board
+  // ---- the sea and everything lying on it
+  groundOn();
+  // nearest-neighbour keeps the tilted blit cheap on slow machines; the sea is flat colour, so it costs little in looks
+  ctx.imageSmoothingEnabled = CAM.t < 0.01;
+  {
+    // only the part of the sea that is on screen
+    const img = seaImage(), M = ctx.getTransform(), det = M.a * M.d - M.b * M.c;
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const [sx, sy] of [[0, 0], [VW, 0], [VW, VH], [0, VH]]) {
+      const px = sx * DPR - M.e, py = sy * DPR - M.f;
+      const gx = (M.d * px - M.c * py) / det, gy = (-M.b * px + M.a * py) / det;
+      x0 = Math.min(x0, gx); x1 = Math.max(x1, gx); y0 = Math.min(y0, gy); y1 = Math.max(y1, gy);
+    }
+    x0 = clamp(Math.floor(x0 - 2), OX, OX + CELL * N); x1 = clamp(Math.ceil(x1 + 2), OX, OX + CELL * N);
+    y0 = clamp(Math.floor(y0 - 2), OY, OY + CELL * N); y1 = clamp(Math.ceil(y1 + 2), OY, OY + CELL * N);
+    if (x1 > x0 && y1 > y0) ctx.drawImage(img, (x0 - OX) * DPR, (y0 - OY) * DPR, (x1 - x0) * DPR, (y1 - y0) * DPR, x0, y0, x1 - x0, y1 - y0);
+  }
+  ctx.imageSmoothingEnabled = true;
+  // light moving on the water
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (let i = 0; i < 26; i++) {
+    const wx = ((hash2(i, 11) + now * (0.012 + 0.01 * hash2(i, 12))) % 1) * N, wy = hash2(i, 13) * N;
+    ctx.moveTo(X(wx), Y(wy)); ctx.lineTo(X(wx + 0.35), Y(wy));
+  }
+  ctx.stroke();
+  // the board's edge, when it throws planes back
   if (G.edgeBounce) {
-    ctx.strokeStyle = '#4fe3ff';
-    ctx.globalAlpha = 0.55 + 0.2 * Math.sin(now * 3);
+    ctx.strokeStyle = `rgba(150,238,255,${0.55 + 0.25 * Math.sin(now * 2.6)})`;
     ctx.lineWidth = 3;
-    ctx.strokeRect(OX - 4, OY - 4, CELL * N + 8, CELL * N + 8);
-    ctx.globalAlpha = 1;
+    ctx.strokeRect(OX, OY, CELL * N, CELL * N);
   }
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const t = G.grid[y * N + x];
-      if (t === 0) {
-        ctx.fillStyle = (x + y) % 2 ? '#131a27' : '#151d2b';
-        ctx.fillRect(X(x) + 1, Y(y) + 1, CELL - 2, CELL - 2);
-      } else if (t === 1) {
-        ctx.fillStyle = '#2b3447';
-        ctx.fillRect(X(x) + 1, Y(y) + 1, CELL - 2, CELL - 2);
-        ctx.fillStyle = '#36415a';
-        ctx.fillRect(X(x) + 1, Y(y) + 1, CELL - 2, CELL * 0.18);
-      } else {
-        const bt = G.bumpT.get(y * N + x);
-        const glow = bt != null && now >= bt && now - bt < 0.35 ? 1 - (now - bt) / 0.35 : 0;
-        ctx.fillStyle = '#0f2730';
-        ctx.fillRect(X(x) + 1, Y(y) + 1, CELL - 2, CELL - 2);
-        ctx.strokeStyle = '#4fe3ff';
-        ctx.lineWidth = 2 + glow * 3;
-        ctx.globalAlpha = 0.8 + 0.2 * glow;
-        roundRect(X(x) + CELL * 0.16, Y(y) + CELL * 0.16, CELL * 0.68, CELL * 0.68, CELL * 0.18);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
+  // where the last move went
+  if (G.lastPath) {
+    const al = G.tl ? 0.24 : 0.17 * Math.max(0, 1 - (now - (G.lastPath.endT || 0)) / 1.8);
+    if (al > 0.004) {
+      ctx.fillStyle = ART.yellow;
+      ctx.globalAlpha = al;
+      for (const [x, y] of G.lastPath.cells) ctx.fillRect(X(x) + 2, Y(y) + 2, CELL - 4, CELL - 4);
+      ctx.globalAlpha = 1;
     }
   }
+  // shadows of the aircraft
+  for (const j of jets) drawJetShadow(j);
 
   // threat marks: old ones while the move plays out, current ones otherwise
   const showNew = !G.tl || now >= G.tl.end;
@@ -971,16 +1748,26 @@ function draw() {
     const k = (now - f.t) / 0.35;
     if (k < 0 || k > 1) continue;
     ctx.fillStyle = f.color;
-    ctx.globalAlpha = 0.65 * (1 - k);
+    ctx.globalAlpha = 0.6 * (1 - k);
     for (const [x, y] of f.cells) ctx.fillRect(X(x) + 1, Y(y) + 1, CELL - 2, CELL - 2);
     ctx.globalAlpha = 1;
   }
-
+  for (const r of G.rings) {
+    const k = (now - r.t) / r.life;
+    if (k < 0 || k > 1) continue;
+    ctx.strokeStyle = r.color;
+    ctx.globalAlpha = 0.85 * (1 - k);
+    ctx.lineWidth = 2.5 * (1 - k) + 0.5;
+    ctx.beginPath();
+    ctx.arc(X(r.x), Y(r.y), CELL * r.r * (0.2 + 0.8 * Math.sqrt(k)), 0, TAU);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
   // incoming
   for (const s of G.spawns) {
     if (now < s.t) continue;
     ctx.strokeStyle = TYPES[s.type].color;
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = 0.85;
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 5]);
     ctx.lineDashOffset = -now * 20;
@@ -991,26 +1778,14 @@ function draw() {
     ctx.globalAlpha = 1;
   }
 
-  // enemies
-  for (const e of G.enemies) {
-    const [x, y] = enemyPos(e);
-    const born = now < e.bornT ? 0 : Math.min(1, (now - e.bornT) / 0.25);
-    if (born <= 0) continue;
-    drawEnemy(e.type, x, y, e, born, 0.6 + 0.4 * born);
-  }
-  for (const c of G.corpses) {
-    if (now < c.t) drawEnemy(c.type, c.x, c.y, null, 1, 1);
-  }
-
   // move options
-  const P = G.player;
   const [ppx, ppy] = playerPos();
   if (showNew && !G.over && !G.pendingClear) {
     // where momentum alone would carry you
     const cxv = P.x + P.vx, cyv = P.y + P.vy;
     if (P.vx || P.vy) {
-      ctx.strokeStyle = '#e8f0ff';
-      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = 0.4;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(CX(P.x), CY(P.y));
@@ -1024,15 +1799,15 @@ function draw() {
       const isAct = act && act.ex === o.ex && act.ey === o.ey;
       const cx = CX(o.ex), cy = CY(o.ey);
       const r = CELL * (isAct ? 0.2 : 0.14);
-      const col = o.danger ? '#ff3d5a' : '#7ff5ff';
+      const col = o.danger ? ART.red : ART.cyan;
       ctx.strokeStyle = col;
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = isAct ? 1 : 0.8;
+      ctx.lineWidth = 2.2;
+      ctx.globalAlpha = isAct ? 1 : 0.9;
       const stops = !!(o.crash || o.clank);
       // a dark backing so the marker stays readable on top of any threat mark
       ctx.save();
-      ctx.globalAlpha = 0.85;
-      ctx.fillStyle = '#0b0e14';
+      ctx.globalAlpha = 0.78;
+      ctx.fillStyle = '#0b2a4f';
       ctx.beginPath();
       ctx.arc(cx, cy, (o.ex === P.x && o.ey === P.y ? CELL * 0.42 : r) + 4, 0, TAU);
       ctx.fill();
@@ -1055,112 +1830,242 @@ function draw() {
         ctx.stroke();
       }
       if (o.kills.length && !(o.ex === P.x && o.ey === P.y)) {
-        ctx.fillStyle = '#ffe14d';
+        ctx.fillStyle = ART.yellow;
         for (let i = 0; i < o.kills.length; i++) {
           const a = -Math.PI / 2 + (i - (o.kills.length - 1) / 2) * 0.6;
           ctx.beginPath();
-          ctx.arc(cx + Math.cos(a) * (r + 5), cy + Math.sin(a) * (r + 5), 2.2, 0, TAU);
+          ctx.arc(cx + Math.cos(a) * (r + 5), cy + Math.sin(a) * (r + 5), 2.4, 0, TAU);
           ctx.fill();
         }
       }
       ctx.globalAlpha = 1;
     }
   }
+  // a gun-sight on the ground under the player while flying
+  if (pj && CAM.t > 0.05) {
+    ctx.strokeStyle = ART.yellow;
+    ctx.globalAlpha = 0.9 * CAM.t;
+    ctx.lineWidth = 2;
+    const gx = CX(ppx), gy = CY(ppy), q = CELL * 0.38, l = CELL * 0.14;
+    ctx.beginPath();
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      ctx.moveTo(gx + sx * q, gy + sy * (q - l)); ctx.lineTo(gx + sx * q, gy + sy * q); ctx.lineTo(gx + sx * (q - l), gy + sy * q);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  groundOff();
 
-  // player
-  {
-    const hurtK = now - G.hurtT;
-    const cx = CX(ppx), cy = CY(ppy);
-    const sp = Math.max(Math.abs(P.vx), Math.abs(P.vy));
-    // speed tail
-    if (sp > 0 && !G.tl) {
-      const ang = Math.atan2(P.vy, P.vx);
-      ctx.strokeStyle = '#e8f0ff';
-      for (let i = 1; i <= sp; i++) {
-        ctx.globalAlpha = 0.5 - i * 0.07;
-        ctx.lineWidth = 2;
+  // ---- things with height, back to front
+  const objs = [];
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const t = G.grid[y * N + x];
+      if (t === 1) for (let q = 0; q < 4; q++) { const pi = x * 2 + (q & 1), pj = y * 2 + (q >> 1); objs.push({ d: depthOf((pi + 0.5) / 2, (pj + 0.5) / 2) - 0.3, f: () => drawPillar(pi, pj) }); }
+      else if (t === 2) objs.push({ d: depthOf(x + 0.5, y + 0.5), f: () => drawVortex(x, y, now) });
+    }
+  }
+  if (G.edgeBounce) {
+    const walls = [[[0, 0], [N, 0]], [[N, 0], [N, N]], [[N, N], [0, N]], [[0, N], [0, 0]]];
+    for (const [a, b] of walls) objs.push({ d: depthOf((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), f: () => windWall(a, b, now), wall: true });
+  }
+  for (const j of jets) {
+    objs.push({ d: depthOf(j.x, j.y) + CELL * 0.45, f: () => {
+      // the line down to the sea, so height is readable from the side
+      if (CAM.t > 0.1 && !j.falling) {
+        const [ax, ay] = proj(j.x, j.y, j.z - 0.1), [bx, by] = proj(j.x, j.y, 0);
+        ctx.strokeStyle = j.type === 'player' ? ART.yellow : ART.red;
+        ctx.globalAlpha = 0.85 * CAM.t;
+        ctx.lineWidth = 1.7;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
+      drawJet(j);
+    } });
+  }
+  objs.sort((a, b) => a.d - b.d);
+  // vapour trails: smooth tapering white ribbons behind every plane in flight
+  const ribbon = (pts, w0, a0) => {
+    ctx.lineCap = 'round';
+    for (let i = 1; i < pts.length; i++) {
+      const f = 1 - i / pts.length;
+      ctx.globalAlpha = a0 * Math.pow(f, 1.2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1, w0 * (0.25 + 0.75 * f));
+      ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+    ctx.globalAlpha = 1;
+  };
+  if (G.tl && now > G.tl.t0 && now < G.tl.pathEnd + 1.2 && playing) {
+    const sp = 0.028 * Math.max(1, Math.pow(G.tl.k, 0.7));
+    const pts = [];
+    for (let i = 0; i <= 36; i++) {
+      const tt = Math.min(now - i * sp, G.tl.pathEnd + 0.02);
+      if (tt < G.tl.t0) break;
+      const [tx, ty, tz] = trailPoint(tt);
+      pts.push(proj(tx, ty, tz));
+    }
+    if (pts.length > 1) ribbon(pts, CELL * CAM.zoom * 0.26, 0.95);
+  }
+  for (const j of jets) {
+    if (!j.e || !j.moved) continue;
+    const pts = [];
+    for (let i = 0; i <= 14; i++) { const [qx, qy] = enemyPosAt(j.e, now - i * 0.05); pts.push(proj(qx + 0.5, qy + 0.5, j.z)); }
+    ribbon(pts, CELL * CAM.zoom * 0.15, 0.8);
+  }
+  for (const o of objs) o.f();
+  drawCubeFront(now);
+
+  // ---- cannon fire: tracers from the player's nose to the plane being shot down
+  if (pj) {
+    for (const g of G.guns) {
+      if (now < g.t0 || now > g.t1) continue;
+      const nose = [pj.x + Math.cos(pj.hd) * 0.55, pj.y + Math.sin(pj.hd) * 0.55, pj.z];
+      const a = proj(nose[0], nose[1], nose[2]), b = proj(g.x, g.y, g.z);
+      ctx.lineCap = 'round';
+      for (let i = 0; i < 7; i++) {
+        const u = ((now * 16 + i / 7) % 1), u2 = Math.min(1, u + 0.16);
+        ctx.strokeStyle = i % 2 ? '#fff6c8' : '#ffd24a';
+        ctx.lineWidth = 2.4;
+        ctx.globalAlpha = 0.95;
         ctx.beginPath();
-        ctx.arc(cx - Math.cos(ang) * CELL * (0.22 + i * 0.13), cy - Math.sin(ang) * CELL * (0.22 + i * 0.13), CELL * 0.33, ang - 0.7, ang + 0.7);
+        ctx.moveTo(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u);
+        ctx.lineTo(a[0] + (b[0] - a[0]) * u2, a[1] + (b[1] - a[1]) * u2);
         ctx.stroke();
       }
+      // muzzle flash
+      const f = 0.7 + 0.3 * Math.sin(now * 90);
+      ctx.fillStyle = '#fff3b0';
+      ctx.globalAlpha = 0.9 * f;
+      ctx.beginPath(); ctx.arc(a[0], a[1], CELL * CAM.zoom * 0.1 * f, 0, TAU); ctx.fill();
+      // strikes along the target
+      ctx.fillStyle = '#ffd24a';
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.arc(b[0] + (Math.random() - 0.5) * 8, b[1] + (Math.random() - 0.5) * 8, CELL * CAM.zoom * 0.06, 0, TAU); ctx.fill();
+      ctx.lineCap = 'butt';
       ctx.globalAlpha = 1;
     }
-    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, CELL * 0.7);
-    glow.addColorStop(0, 'rgba(230,245,255,0.35)');
-    glow.addColorStop(1, 'rgba(230,245,255,0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(cx, cy, CELL * 0.7, 0, TAU);
-    ctx.fill();
-    ctx.fillStyle = hurtK >= 0 && hurtK < 0.4 && Math.floor(hurtK * 20) % 2 === 0 ? '#ff3d5a' : '#f4f9ff';
-    if (!G.over || now < G.overT) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, CELL * 0.27, 0, TAU);
-      ctx.fill();
-    }
   }
 
-  // particles
-  for (const p of G.particles) {
+  // ---- explosions, smoke, wreckage (smoke under fire, sparks on top)
+  const PRIO = { smoke: 0, spray: 0, fire: 1, debris: 2, spark: 3 };
+  const parts = G.particles.filter(p => now >= p.t && now <= p.t + p.life).sort((a, b) => PRIO[a.kind] - PRIO[b.kind]);
+  for (const p of parts) {
     const k = now - p.t;
-    if (k < 0) continue;
-    const e = 1 - Math.exp(-k * 4);
-    ctx.globalAlpha = Math.max(0, 1 - k / p.life);
-    ctx.fillStyle = p.color;
-    const s = Math.max(2, CELL * 0.07);
-    ctx.fillRect(CX(p.x - 0.5 + p.vx * e * 0.25) - s / 2, CY(p.y - 0.5 + p.vy * e * 0.25) - s / 2, s, s);
+    if (k < 0 || k > p.life) continue;
+    const u = k / p.life;
+    const x = p.x + p.vx * k, y = p.y + p.vy * k;
+    const z = p.z + p.vz * k - (p.kind === 'debris' ? 3.4 * k * k : p.kind === 'spark' ? 2 * k * k : 0);
+    if (z < -0.05 && p.kind !== 'smoke') continue;
+    const [sx, sy] = proj(x, y, Math.max(0, z));
+    const R = CELL * CAM.zoom;
+    if (p.kind === 'fire') {
+      const r = R * p.size * (0.22 + 0.8 * Math.sqrt(u));
+      ctx.globalAlpha = Math.pow(1 - u, 1.1);
+      ctx.fillStyle = '#ff8a2a';
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#ffd35a';
+      ctx.beginPath(); ctx.arc(sx, sy, r * 0.62, 0, TAU); ctx.fill();
+      if (p.core) { ctx.fillStyle = '#fffbe8'; ctx.beginPath(); ctx.arc(sx, sy, r * 0.32, 0, TAU); ctx.fill(); }
+    } else if (p.kind === 'smoke') {
+      ctx.globalAlpha = 0.55 * (1 - u);
+      const g = Math.round(70 + 60 * u);
+      ctx.fillStyle = `rgb(${g},${g + 4},${g + 12})`;
+      ctx.beginPath(); ctx.arc(sx, sy, R * p.size * (0.2 + 0.55 * u), 0, TAU); ctx.fill();
+    } else if (p.kind === 'debris') {
+      ctx.globalAlpha = 1 - u * u;
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(p.rot + p.spin * k);
+      ctx.fillStyle = p.color;
+      const s0 = Math.max(2.5, R * 0.07 * p.size);
+      ctx.fillRect(-s0, -s0 * 0.5, s0 * 2, s0);
+      ctx.restore();
+    } else if (p.kind === 'spark') {
+      const [qx, qy] = proj(x - p.vx * 0.03, y - p.vy * 0.03, Math.max(0, z));
+      ctx.globalAlpha = 1 - u;
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(qx, qy); ctx.lineTo(sx, sy); ctx.stroke();
+    } else if (p.kind === 'spray') {
+      ctx.globalAlpha = 0.7 * (1 - u);
+      ctx.fillStyle = '#e8f6ff';
+      ctx.beginPath(); ctx.ellipse(sx, sy - R * 0.2 * Math.sin(Math.PI * u), R * 0.22 * p.size, R * 0.1 * p.size, 0, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
   }
-  ctx.globalAlpha = 1;
+  // a wounded plane trails smoke
+  if (pj && P.hp === 1 && Math.floor(now * 14) !== Math.floor((now - dtc) * 14)) {
+    addP({ kind: 'smoke', x: pj.x, y: pj.y, z: pj.z - 0.05, vx: 0, vy: 0, vz: 0.25, t: now, life: 0.8, size: 0.5 });
+  }
 
-  // score popups
+  // ---- score pops
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   for (const p of G.popups) {
     const k = now - p.t;
     if (k < 0) continue;
+    const [sx, sy] = proj(p.x + 0.5, p.y + 0.5, 1.5 + k * 0.9);
     ctx.globalAlpha = Math.max(0, 1 - k);
-    ctx.fillStyle = p.big ? '#ffe14d' : '#ffffff';
-    ctx.font = `700 ${Math.round(CELL * (p.big ? 0.48 : 0.36))}px ui-monospace, Menlo, Consolas, monospace`;
-    ctx.fillText(p.text, CX(p.x), CY(p.y) - k * CELL * 0.8);
+    ctx.font = `800 ${Math.round(CELL * (p.big ? 0.5 : 0.38))}px ${SANS}`;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(10,36,70,0.85)';
+    ctx.strokeText(p.text, sx, sy);
+    ctx.fillStyle = p.big ? ART.yellow : '#ffffff';
+    ctx.fillText(p.text, sx, sy);
   }
   ctx.globalAlpha = 1;
-  ctx.restore();
 
   drawHud();
 
-  // hurt vignette
+  // hurt flash
   const hk = now - G.hurtT;
   if (hk >= 0 && hk < 0.5) {
-    ctx.fillStyle = '#ff2040';
-    ctx.globalAlpha = 0.25 * (1 - hk / 0.5);
+    ctx.fillStyle = '#ff3b30';
+    ctx.globalAlpha = 0.28 * (1 - hk / 0.5);
     ctx.fillRect(0, 0, VW, VH);
     ctx.globalAlpha = 1;
   }
 
-  // floor intro
+  // a new area: through the cloud
   const tk = now - G.transT;
-  if (tk >= 0 && tk < 1.3) {
-    const a = tk < 0.2 ? 1 : Math.max(0, 1 - (tk - 0.5) / 0.8);
-    ctx.globalAlpha = a * 0.85;
-    ctx.fillStyle = '#0b0e14';
-    ctx.fillRect(0, 0, VW, VH);
+  if (tk >= 0 && tk < 1.4) {
+    const a = tk < 0.35 ? 1 : Math.max(0, 1 - (tk - 0.35) / 0.9);
     ctx.globalAlpha = a;
-    ctx.fillStyle = '#e8f0ff';
-    ctx.font = `300 ${Math.round(CELL * 1.6)}px ui-monospace, Menlo, Consolas, monospace`;
+    const g = ctx.createLinearGradient(0, 0, 0, VH);
+    g.addColorStop(0, '#dff0fc'); g.addColorStop(1, '#a9d4f4');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = ART.navy;
+    ctx.font = `800 ${Math.round(CELL * 1.25)}px ${SANS}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('F' + G.floor, VW / 2, VH / 2);
+    ctx.fillText('AREA ' + String(G.floor).padStart(2, '0'), VW / 2, VH / 2);
+    // a contrail sweeping across
+    const sx = -80 + (VW + 160) * clamp(tk / 1.1, 0, 1);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(sx - VW * 0.35, VH / 2 + CELL * 1.5); ctx.lineTo(sx, VH / 2 + CELL * 1.5); ctx.stroke();
+    miniJet(sx + 12, VH / 2 + CELL * 1.5, CELL * 0.4, ART.navy, 1);
     ctx.globalAlpha = 1;
   }
   if (G.titleT > -1) {
     const k = now - G.titleT;
     if (k < 3.5) {
-      ctx.globalAlpha = Math.max(0, k < 2 ? 0.9 : 0.9 * (1 - (k - 2) / 1.5));
-      ctx.fillStyle = '#e8f0ff';
-      ctx.font = `200 ${Math.round(Math.min(VW, VH) * 0.11)}px "Hiragino Mincho ProN", "Yu Mincho", serif`;
+      ctx.globalAlpha = Math.max(0, k < 1.4 ? Math.min(1, k) : 1 - (k - 1.4) / 2.1);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('慣性', VW / 2, OY + CELL * 2.2);
+      const fs = Math.round(Math.min(VW, VH) * 0.18);
+      ctx.font = `800 ${fs}px ${SANS}`;
+      ctx.lineWidth = Math.max(6, fs * 0.08);
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = ART.navy;
+      ctx.strokeText('慣性', VW / 2, OY + CELL * 2.6);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('慣性', VW / 2, OY + CELL * 2.6);
       ctx.globalAlpha = 1;
     }
   }
@@ -1168,27 +2073,27 @@ function draw() {
   // game over
   if (G.over && now >= G.overT) {
     const a = Math.min(1, (now - G.overT) / 0.5);
-    ctx.globalAlpha = a * 0.82;
-    ctx.fillStyle = '#0b0e14';
+    ctx.globalAlpha = a * 0.72;
+    ctx.fillStyle = '#0a2547';
     ctx.fillRect(0, 0, VW, VH);
     ctx.globalAlpha = a;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const big = Math.round(Math.min(VW, VH) * 0.13);
-    ctx.fillStyle = G.newBest ? '#ffe14d' : '#e8f0ff';
-    ctx.font = `300 ${big}px ui-monospace, Menlo, Consolas, monospace`;
+    const big = Math.round(Math.min(VW, VH) * 0.15);
+    ctx.fillStyle = G.newBest ? ART.yellow : '#ffffff';
+    ctx.font = `800 ${big}px ${SANS}`;
     ctx.fillText(String(G.score), VW / 2, VH * 0.42);
-    ctx.font = `500 ${Math.round(big * 0.22)}px ui-monospace, Menlo, Consolas, monospace`;
-    ctx.fillStyle = '#8b9ab3';
-    ctx.fillText('F' + G.floor + '   BEST ' + G.best, VW / 2, VH * 0.42 + big * 0.85);
+    ctx.fillStyle = '#b8dcf7';
+    ctx.font = `700 ${Math.round(big * 0.24)}px ${SANS}`;
+    ctx.fillText('AREA ' + String(G.floor).padStart(2, '0') + '   BEST ' + G.best, VW / 2, VH * 0.42 + big * 0.85);
     ctx.globalAlpha = 1;
   }
 }
 
 function drawPreview(o) {
   const P = G.player;
-  ctx.strokeStyle = o.danger ? '#ff3d5a' : '#7ff5ff';
-  ctx.globalAlpha = 0.7;
+  ctx.strokeStyle = o.danger ? ART.red : ART.yellow;
+  ctx.globalAlpha = 0.85;
   ctx.lineWidth = Math.max(2, CELL * 0.06);
   ctx.lineJoin = 'round';
   ctx.beginPath();
@@ -1199,15 +2104,15 @@ function drawPreview(o) {
   ctx.stroke();
   // cells passed
   for (let i = 1; i < o.path.length; i++) {
-    ctx.fillStyle = '#7ff5ff';
-    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = ART.yellow;
+    ctx.globalAlpha = 0.13;
     ctx.fillRect(X(o.path[i].x) + 2, Y(o.path[i].y) + 2, CELL - 4, CELL - 4);
   }
   // stop marks
   const stop = o.crash || o.clank;
   if (stop) {
     ctx.globalAlpha = 0.95;
-    ctx.strokeStyle = '#ff3d5a';
+    ctx.strokeStyle = ART.red;
     ctx.lineWidth = 3;
     const s = CELL * 0.14;
     ctx.beginPath();
@@ -1218,7 +2123,7 @@ function drawPreview(o) {
   // targets
   for (const k of o.kills) {
     ctx.globalAlpha = 0.95;
-    ctx.strokeStyle = '#ffe14d';
+    ctx.strokeStyle = ART.yellow;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.arc(CX(k.e.x), CY(k.e.y), CELL * 0.45, 0, TAU);
@@ -1227,7 +2132,7 @@ function drawPreview(o) {
   // momentum after the move
   if (o.vx || o.vy) {
     ctx.globalAlpha = 0.35;
-    ctx.strokeStyle = '#e8f0ff';
+    ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 2;
     ctx.setLineDash([3, 4]);
     ctx.beginPath();
@@ -1239,46 +2144,71 @@ function drawPreview(o) {
   ctx.globalAlpha = 1;
 }
 
+let speedBtns = [];
 function drawHud() {
   const P = G.player;
   const y = Math.max(12, OY - 46);
+  const big = Math.round(clamp(CELL * 0.62, 19, 28));
+  // a pale plate behind the figures
+  ctx.fillStyle = 'rgba(10,38,76,0.74)';
+  roundRect(OX - 2, y - 9, CELL * N + 4, big + 28, 10);
+  ctx.fill();
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  ctx.fillStyle = '#e8f0ff';
-  ctx.font = `600 ${Math.round(clamp(CELL * 0.6, 18, 28))}px ui-monospace, Menlo, Consolas, monospace`;
-  ctx.fillText(String(G.score), OX, y);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `800 ${big}px ${SANS}`;
+  ctx.fillText(String(G.score), OX + 12, y - 2);
   const sw = ctx.measureText(String(G.score)).width;
   if (G.best > 0) {
-    ctx.fillStyle = G.score > G.best ? '#ffe14d' : '#4f5a70';
-    ctx.font = `500 ${Math.round(clamp(CELL * 0.26, 10, 13))}px ui-monospace, Menlo, Consolas, monospace`;
-    ctx.fillText('BEST ' + Math.max(G.best, G.score), OX, y + clamp(CELL * 0.6, 18, 28) + 4);
-    ctx.font = `600 ${Math.round(clamp(CELL * 0.6, 18, 28))}px ui-monospace, Menlo, Consolas, monospace`;
+    ctx.fillStyle = G.score > G.best ? ART.yellow : '#8fb4d6';
+    ctx.font = `700 ${Math.round(clamp(CELL * 0.26, 10, 13))}px ${SANS}`;
+    ctx.fillText('BEST ' + Math.max(G.best, G.score), OX + 12, y + big + 1);
+    ctx.font = `800 ${big}px ${SANS}`;
   }
   if (G.streak >= 2) {
-    ctx.fillStyle = '#ffe14d';
-    ctx.font = `700 ${Math.round(clamp(CELL * 0.42, 14, 20))}px ui-monospace, Menlo, Consolas, monospace`;
-    ctx.fillText('×' + G.streak, OX + sw + 10, y + 4);
+    ctx.fillStyle = ART.yellow;
+    ctx.font = `800 ${Math.round(clamp(CELL * 0.44, 14, 21))}px ${SANS}`;
+    ctx.fillText('×' + G.streak, OX + 12 + sw + 10, y + 3);
   }
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#8b9ab3';
-  ctx.font = `500 ${Math.round(clamp(CELL * 0.4, 13, 18))}px ui-monospace, Menlo, Consolas, monospace`;
-  ctx.fillText('F' + G.floor, OX + CELL * N / 2, y + 4);
-  // hearts
-  const hr = clamp(CELL * 0.17, 5, 9);
-  for (let i = 0; i < 3; i++) {
-    const hx = OX + CELL * N - hr - i * (hr * 2.8), hy = y + hr + 3;
-    ctx.beginPath();
-    ctx.arc(hx, hy, hr, 0, TAU);
-    if (i < P.hp) { ctx.fillStyle = '#ff3d5a'; ctx.fill(); } else { ctx.strokeStyle = '#4a5368'; ctx.lineWidth = 2; ctx.stroke(); }
+  ctx.fillStyle = '#cfe6f8';
+  ctx.font = `800 ${Math.round(clamp(CELL * 0.4, 13, 18))}px ${SANS}`;
+  ctx.fillText('AREA ' + String(G.floor).padStart(2, '0'), OX + CELL * N / 2, y + 4);
+  // hit points: three little fighters
+  const hr = clamp(CELL * 0.2, 7, 11);
+  for (let i = 0; i < 3; i++) miniJet(OX + CELL * N - 16 - i * (hr * 2.6) - hr * 0.3, y + hr + 4, hr, i < P.hp ? '#ffffff' : '#5b7da3', i < P.hp ? 1 : 0.55);
+  // flight speed: slow, steady, quick
+  speedBtns = [];
+  {
+    const bw = 34, bh = 18, gap = 6, by0 = OY + CELL * N + 5;
+    const x0 = OX + CELL * N - 3 * bw - 2 * gap;
+    for (let i = 0; i < 3; i++) {
+      const bx = x0 + i * (bw + gap);
+      const on = i === speedIdx;
+      ctx.fillStyle = on ? '#ffffff' : 'rgba(10,38,76,0.6)';
+      roundRect(bx, by0, bw, bh, 9);
+      ctx.fill();
+      ctx.fillStyle = on ? ART.navy : '#bcd8ee';
+      for (let k = 0; k <= i; k++) {
+        const cx0 = bx + bw / 2 + (k - i / 2) * 7;
+        ctx.beginPath();
+        ctx.moveTo(cx0 - 3, by0 + 5); ctx.lineTo(cx0 + 3, by0 + bh / 2); ctx.lineTo(cx0 - 3, by0 + bh - 5);
+        ctx.closePath();
+        ctx.fill();
+      }
+      speedBtns.push({ x: bx - 3, y: by0 - 9, w: bw + 6, h: bh + 18, i });
+    }
   }
-  // floor progress
-  const by = OY + CELL * N + 12;
+  // progress: one pip per aircraft to bring down
+  const by = OY + CELL * N + 14;
   const total = G.quota;
-  const dw = Math.min(12, (CELL * N) / Math.max(1, total) - 3);
-  const startX = OX + CELL * N / 2 - (total * (dw + 3)) / 2;
+  const areaW = CELL * N - 3 * 34 - 2 * 6 - 14;
+  const dw = clamp(areaW / Math.max(1, total) - 3, 3, 12);
+  const startX = OX + 4;
   for (let i = 0; i < total; i++) {
-    ctx.fillStyle = i < G.killed ? '#e8f0ff' : '#2b3447';
-    ctx.fillRect(startX + i * (dw + 3), by, dw, 4);
+    ctx.fillStyle = i < G.killed ? '#ffffff' : 'rgba(10,38,76,0.55)';
+    roundRect(startX + i * (dw + 3), by - 3, dw, 6, 3);
+    ctx.fill();
   }
 }
 
@@ -1309,9 +2239,13 @@ canvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   canvas.focus();
   Sfx.ensure();
+  const [lx, ly] = toLocal(e);
+  for (const b of speedBtns) {
+    if (lx >= b.x && lx <= b.x + b.w && ly >= b.y && ly <= b.y + b.h) { if (!G.over) { setSpeed(b.i); Sfx.select(); } return; }
+  }
   if (restartIfOver()) return;
   if (busy()) return;
-  const m = markerAt(...toLocal(e));
+  const m = markerAt(lx, ly);
   if (e.pointerType === 'mouse') {
     if (m) commit(m);
     return;
@@ -1343,6 +2277,7 @@ function optionFor(ax, ay) {
   return G.markers.find(m => m.ex === o.ex && m.ey === o.ey) || o;
 }
 window.addEventListener('keydown', e => {
+  if (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3') { setSpeed(+e.code[5] - 1); return; }
   if (DIRKEY[e.code] || NUMPAD[e.code] || e.code === 'Space' || e.code === 'Enter') e.preventDefault();
   Sfx.ensure();
   if (e.repeat) return;
@@ -1389,6 +2324,7 @@ window.__kansei = {
   commit: o => commit(o),
   optionFor,
   sim: (ax, ay) => simulate(ax, ay),
+  plan: (o, t0, step, crashed) => planManeuvers(o, t0, step, crashed),
   threats: ks => threatCells(ks),
   setSeed: s => { seed = s >>> 0; },
   newRun,
