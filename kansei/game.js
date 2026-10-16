@@ -1143,33 +1143,103 @@ function drawSlab() {
 }
 
 // ---------------------------------------------------------------- aircraft
+// real aircraft, seen from above: F-22 (you), F-16, A-10, MiG-31, B-2
 const JET = {
-  player: { L: 1.0, span: 0.46, W: 1.0, body: '#f6f9fc', wing: '#d9e4f0', accent: '#2f6fc0', canopy: '#27497f' },
-  spike: { L: 0.92, span: 0.4, W: 0.9, body: '#d6403a', wing: '#b02c30', accent: '#24305e', canopy: '#1b2447' },
-  shell: { L: 1.02, span: 0.5, W: 1.55, body: '#c53533', wing: '#992629', accent: '#24305e', canopy: '#1b2447', pips: true },
-  lancer: { L: 1.16, span: 0.32, W: 0.75, body: '#e04a36', wing: '#bb3a30', accent: '#ffb03a', canopy: '#1b2447' },
-  mortar: { L: 1.06, span: 0.6, W: 1.3, body: '#b8383f', wing: '#8f2a35', accent: '#d467d9', canopy: '#1b2447', sweep: 0.55 },
+  player: { model: 'f22', L: 1.02, body: '#cfd7e0', wing: '#a7b2bf', accent: '#3a6fb8', canopy: '#2b4a6c' },
+  spike: { model: 'f16', L: 0.9, body: '#d2403a', wing: '#a82b2f', accent: '#24305e', canopy: '#1b2447' },
+  shell: { model: 'a10', L: 1.02, body: '#b83a34', wing: '#8f2b2b', accent: '#4a2330', canopy: '#1b2447', pips: true },
+  lancer: { model: 'mig31', L: 1.2, body: '#d9503a', wing: '#b33c33', accent: '#ffb03a', canopy: '#1b2447' },
+  mortar: { model: 'b2', L: 1.08, body: '#7a2736', wing: '#5f1d2b', accent: '#d467d9', canopy: '#1b1020' },
+};
+// each shape: [fore-aft, sideways, height] in fractions of the plane's length; g mirrors it
+const SHAPES = {
+  f22: g => ({
+    tails: [[-0.5, 0.04], [-0.5, -0.04]],
+    p: [
+      { k: 'wing', p: [[0.1, 0.08 * g], [-0.12, 0.38 * g], [-0.2, 0.38 * g], [-0.3, 0.09 * g]] },
+      { k: 'wing', p: [[-0.3, 0.08 * g], [-0.44, 0.22 * g], [-0.5, 0.21 * g], [-0.46, 0.08 * g]] },
+      { k: 'accent', fin: true, p: [[-0.28, 0.07 * g, 0.02], [-0.48, 0.08 * g, 0.02], [-0.52, 0.15 * g, 0.2], [-0.42, 0.14 * g, 0.2]] },
+    ],
+  }),
+  f16: g => ({
+    tails: [[-0.5, 0]],
+    p: [
+      { k: 'wing', p: [[0.0, 0.07 * g], [-0.16, 0.3 * g], [-0.26, 0.3 * g], [-0.26, 0.07 * g]] },
+      { k: 'wing', p: [[0.2, 0.05 * g], [0.02, 0.15 * g], [0.0, 0.07 * g]] },
+      { k: 'wing', p: [[-0.36, 0.07 * g], [-0.46, 0.19 * g], [-0.5, 0.19 * g], [-0.5, 0.06 * g]] },
+    ],
+  }),
+  a10: g => ({
+    tails: [[-0.5, 0.105], [-0.5, -0.105]],
+    p: [
+      { k: 'wing', p: [[0.1, 0.07 * g], [0.1, 0.5 * g], [-0.08, 0.5 * g], [-0.12, 0.07 * g]] },
+      { k: 'accent', p: [[-0.05, 0.1 * g], [-0.05, 0.48 * g], [-0.08, 0.5 * g], [-0.12, 0.07 * g]] },
+      { k: 'wing', p: [[-0.38, 0.06 * g], [-0.38, 0.27 * g], [-0.48, 0.27 * g], [-0.5, 0.06 * g]] },
+      { k: 'accent', fin: true, p: [[-0.38, 0.27 * g, 0.0], [-0.48, 0.27 * g, 0.0], [-0.5, 0.27 * g, 0.24], [-0.42, 0.27 * g, 0.24]] },
+      { k: 'accent', p: [[-0.02, 0.08 * g, 0.08], [-0.1, 0.065 * g, 0.08], [-0.5, 0.07 * g, 0.07], [-0.5, 0.14 * g, 0.07], [-0.1, 0.155 * g, 0.08], [-0.02, 0.125 * g, 0.08]] },
+    ],
+  }),
+  mig31: g => ({
+    tails: [[-0.52, 0.07], [-0.52, -0.07]],
+    p: [
+      { k: 'wing', p: [[0.04, 0.15 * g], [-0.2, 0.4 * g], [-0.32, 0.4 * g], [-0.34, 0.15 * g]] },
+      { k: 'wing', p: [[-0.38, 0.13 * g], [-0.5, 0.26 * g], [-0.56, 0.26 * g], [-0.54, 0.12 * g]] },
+      { k: 'canopy', p: [[0.2, 0.09 * g, 0.01], [0.2, 0.14 * g, 0.01], [0.06, 0.15 * g, 0.01], [0.06, 0.1 * g, 0.01]] },
+      { k: 'accent', fin: true, p: [[-0.3, 0.17 * g, 0.03], [-0.5, 0.17 * g, 0.03], [-0.55, 0.17 * g, 0.3], [-0.43, 0.17 * g, 0.3]] },
+    ],
+  }),
+  b2: g => ({
+    tails: [[-0.22, 0.09], [-0.22, -0.09]],
+    p: [
+      { k: 'wing', p: [[0.3, 0], [-0.16, 0.62 * g], [-0.2, 0.6 * g], [-0.08, 0.44 * g], [-0.2, 0.3 * g], [-0.1, 0.16 * g], [-0.22, 0.08 * g], [-0.24, 0]] },
+      { k: 'accent', p: [[0.18, 0.02 * g], [0.0, 0.14 * g], [-0.02, 0.1 * g], [0.1, 0.0]] },
+    ],
+  }),
+};
+const BODIES = {
+  f22: [[0.5, 0], [0.32, 0.045], [0.12, 0.1], [-0.1, 0.11], [-0.34, 0.09], [-0.5, 0.06], [-0.5, -0.06], [-0.34, -0.09], [-0.1, -0.11], [0.12, -0.1], [0.32, -0.045]],
+  f16: [[0.5, 0], [0.34, 0.04], [0.1, 0.075], [-0.2, 0.08], [-0.42, 0.07], [-0.5, 0.05], [-0.5, -0.05], [-0.42, -0.07], [-0.2, -0.08], [0.1, -0.075], [0.34, -0.04]],
+  a10: [[0.5, 0], [0.4, 0.05], [0.2, 0.075], [-0.1, 0.07], [-0.4, 0.045], [-0.5, 0.03], [-0.5, -0.03], [-0.4, -0.045], [-0.1, -0.07], [0.2, -0.075], [0.4, -0.05]],
+  mig31: [[0.52, 0], [0.36, 0.045], [0.18, 0.11], [0.0, 0.15], [-0.3, 0.15], [-0.5, 0.11], [-0.5, -0.11], [-0.3, -0.15], [0.0, -0.15], [0.18, -0.11], [0.36, -0.045]],
+  b2: null,
+};
+const CANOPIES = {
+  f22: [[0.32, 0, 0.03], [0.2, 0.04, 0.06], [0.04, 0.04, 0.06], [0.0, 0, 0.04], [0.04, -0.04, 0.06], [0.2, -0.04, 0.06]],
+  f16: [[0.3, 0, 0.03], [0.2, 0.045, 0.06], [0.0, 0.045, 0.06], [-0.04, 0, 0.04], [0.0, -0.045, 0.06], [0.2, -0.045, 0.06]],
+  a10: [[0.34, 0, 0.03], [0.24, 0.035, 0.05], [0.1, 0.035, 0.05], [0.06, 0, 0.03], [0.1, -0.035, 0.05], [0.24, -0.035, 0.05]],
+  mig31: [[0.34, 0, 0.03], [0.24, 0.04, 0.06], [0.1, 0.04, 0.06], [0.08, 0, 0.04], [0.1, -0.04, 0.06], [0.24, -0.04, 0.06]],
+  b2: [[0.16, 0, 0.02], [0.08, 0.025, 0.03], [0.02, 0, 0.02], [0.08, -0.025, 0.03]],
 };
 // the aircraft as flat panels, turned by heading, pitch (nose up) and roll (about its own axis)
 function jetPolys(sp, ox, oy, oz, hd, pitch, roll) {
   const dx = Math.cos(hd), dy = Math.sin(hd), rx = -dy, ry = dx;
   const cr = Math.cos(roll), sr = Math.sin(roll), cp = Math.cos(pitch), spn = Math.sin(pitch);
+  const L = sp.L;
   const T = (f, r, zz) => {
-    const z0 = zz || 0;
-    const r1 = r * cr - z0 * sr, z1 = r * sr + z0 * cr;
-    const f2 = f * cp - z1 * spn, z2 = f * spn + z1 * cp;
+    const z0 = (zz || 0) * L;
+    const r0 = r * L;
+    const r1 = r0 * cr - z0 * sr, z1 = r0 * sr + z0 * cr;
+    const f0 = f * L;
+    const f2 = f0 * cp - z1 * spn, z2 = f0 * spn + z1 * cp;
     return [ox + f2 * dx + r1 * rx, oy + f2 * dy + r1 * ry, oz + z2];
   };
-  const L = sp.L, W = sp.W, S = sp.span, sw = sp.sweep == null ? 1 : sp.sweep;
   const out = [];
-  for (const g of [1, -1]) out.push({ c: sp.wing, p: [T(0.14 * L, 0.05 * g), T((-0.2 * sw - 0.02) * L, S * g), T(-0.32 * L, S * 0.9 * g), T(-0.26 * L, 0.05 * g)] });
-  for (const g of [1, -1]) out.push({ c: sp.wing, p: [T(-0.3 * L, 0.04 * g), T(-0.46 * L, S * 0.5 * g), T(-0.51 * L, S * 0.44 * g), T(-0.42 * L, 0.03 * g)] });
-  out.push({ c: sp.body, body: true, p: [T(0.52 * L, 0), T(0.24 * L, 0.075 * W), T(-0.3 * L, 0.07 * W), T(-0.46 * L, 0), T(-0.3 * L, -0.07 * W), T(0.24 * L, -0.075 * W)] });
-  for (const g of [1, -1]) out.push({ c: sp.accent, p: [T(-0.2 * L, S * 0.8 * g), T(-0.22 * L, S * g), T(-0.32 * L, S * 0.9 * g), T(-0.3 * L, S * 0.72 * g)] });
-  out.push({ c: sp.accent, fin: true, p: [T(-0.26 * L, 0, 0.02), T(-0.46 * L, 0, 0.02), T(-0.52 * L, 0, 0.27), T(-0.4 * L, 0, 0.28)] });
-  out.push({ c: sp.canopy, p: [T(0.3 * L, 0, 0.03), T(0.16 * L, 0.045 * W, 0.05), T(-0.06 * L, 0.04 * W, 0.04), T(-0.06 * L, -0.04 * W, 0.04), T(0.16 * L, -0.045 * W, 0.05)] });
+  const panel = (c, pts, extra) => out.push(Object.assign({ c, p: pts.map(q => T(q[0], q[1], q[2])) }, extra));
+  const col = k => (k === 'wing' ? sp.wing : k === 'accent' ? sp.accent : k === 'canopy' ? sp.canopy : sp.body);
+  const parts = [SHAPES[sp.model](1), SHAPES[sp.model](-1)];
+  // panels that lie flat go under the fuselage; fins and pods on top
+  for (const pt of parts) for (const q of pt.p) if (!q.fin) panel(col(q.k), q.p);
+  if (BODIES[sp.model]) panel(sp.body, BODIES[sp.model], { body: true });
+  else { // the flying wing is all one body: lay a lighter hump down its middle
+    const hump = [[0.26, 0], [0.02, 0.1], [-0.2, 0.06], [-0.22, 0], [-0.2, -0.06], [0.02, -0.1]];
+    panel(sp.body, hump, { body: true });
+  }
+  for (const pt of parts) for (const q of pt.p) if (q.fin) panel(col(q.k), q.p, { fin: true });
+  panel(sp.canopy, CANOPIES[sp.model], { canopy: true });
+  out.tails = parts[0].tails.map(t => T(t[0], t[1], 0));
   return out;
 }
+
 function shadeHex(h, k) {
   const n = parseInt(h.slice(1), 16);
   return `rgb(${Math.min(255, Math.round((n >> 16) * k))},${Math.min(255, Math.round(((n >> 8) & 255) * k))},${Math.min(255, Math.round((n & 255) * k))})`;
@@ -1205,7 +1275,7 @@ function drawJet(j) {
     ctx.strokeStyle = 'rgba(10,28,58,0.5)';
     ctx.lineWidth = 0.8;
     ctx.stroke();
-    if (q.c === sp.canopy) {
+    if (q.canopy) {
       const cx0 = (pts[0][0] + pts[2][0]) / 2, cy0 = (pts[0][1] + pts[2][1]) / 2, rr = Math.hypot(pts[0][0] - pts[2][0], pts[0][1] - pts[2][1]) * 0.45;
       const cg = ctx.createRadialGradient(cx0 - rr * 0.3, cy0 - rr * 0.35, 0, cx0, cy0, rr);
       cg.addColorStop(0, 'rgba(210,235,255,0.85)'); cg.addColorStop(0.5, 'rgba(120,170,230,0.25)'); cg.addColorStop(1, 'rgba(0,0,0,0)');
@@ -1225,10 +1295,9 @@ function drawJet(j) {
     }
   }
   // engine glow
-  const tail = jetPolys({ L: sp.L, span: 0, W: 0, sweep: 0 }, j.x, j.y, j.z, j.hd, j.pitch || 0, j.roll || 0)[4].p[3];
-  const [tx, ty] = proj(tail[0], tail[1], tail[2]);
-  {
-    const gr = CELL * CAM.zoom * 0.2, gl = ctx.createRadialGradient(tx, ty, 0, tx, ty, gr);
+  for (const tl of polys.tails) {
+    const [tx, ty] = proj(tl[0], tl[1], tl[2]);
+    const gr = CELL * CAM.zoom * (polys.tails.length > 1 ? 0.13 : 0.19), gl = ctx.createRadialGradient(tx, ty, 0, tx, ty, gr);
     const hot = j.type === 'player' ? ['rgba(235,250,255,0.95)', 'rgba(110,190,255,0.5)', 'rgba(60,120,255,0)'] : ['rgba(255,245,200,0.95)', 'rgba(255,150,60,0.55)', 'rgba(255,70,20,0)'];
     gl.addColorStop(0, hot[0]); gl.addColorStop(0.35, hot[1]); gl.addColorStop(1, hot[2]);
     ctx.globalCompositeOperation = 'lighter';
