@@ -808,9 +808,9 @@ function busy() { return G.tl && G.clock < G.tl.end; }
 
 // ============================================================ flight plans
 // Altitudes are in cells above the sea. The glass cube above the board is CUBE_H high.
-const CUBE_H = 3.4;
-const enemyAlt = id => 1.7 + 0.35 * ((id * 5) % 4) / 3 * 2;      // 1.7 .. 2.4
-const playerAlt = 1.9;
+const CUBE_H = N;   // a true cube: as tall as the board is wide
+const enemyAlt = id => 2.3 + 0.8 * ((id * 5) % 4) / 3;      // 2.3 .. 3.1
+const playerAlt = 2.6;
 function fallPos(sx, sy, sz, lx, ly, u) {
   const e = u * u;
   return [sx + (lx - sx) * u, sy + (ly - sy) * u, sz * (1 - e) + 0.05];
@@ -925,7 +925,8 @@ function hash2(a, b) {
 const smooth = v => v * v * (3 - 2 * v);
 
 // ---------------------------------------------------------------- camera
-const CAM = { t: 0, sinP: 1, cosP: 0, c: 1, s: 0, zoom: 1, bx: 0, by: 0, bx0: 0, by0: 0, shx: 0, shy: 0 };
+const ZOOM_ACT = 1.75, ZOOM_ENEMY = 1.4;
+const CAM = { fx: N / 2, fy: N / 2, zf: ZOOM_ACT, last: null, t: 0, sinP: 1, cosP: 0, c: 1, s: 0, zoom: 1, bx: 0, by: 0, bx0: 0, by0: 0, shx: 0, shy: 0 };
 const PITCH_DOWN = Math.PI / 2, PITCH_FLY = 0.66, YAW_FLY = -0.26, SLAB_D = 1.5;
 function updateCam(now) {
   let t = 0;
@@ -940,12 +941,22 @@ function updateCam(now) {
   const yaw = YAW_FLY * t;
   CAM.sinP = Math.sin(phi); CAM.cosP = Math.cos(phi);
   CAM.c = Math.cos(yaw); CAM.s = Math.sin(yaw);
-  // keep the whole turned board on screen, whatever the screen's shape
+  // close in on the action: follow the player's plane, then ease back to take in the enemy's reply
   const spread = Math.cos(YAW_FLY) + Math.abs(Math.sin(YAW_FLY));
-  const fitW = (VW - 14) / (N * CELL * spread);
-  const fitH = (VH - 96) / (N * CELL * spread * Math.sin(PITCH_FLY) + CELL * Math.cos(PITCH_FLY) * (SLAB_D + CUBE_H));
-  const fit = Math.min(1.06, fitW, fitH);
-  CAM.zoom = 1 + (fit - 1) * t;
+  const fit = Math.min(1.06, (VW - 14) / (N * CELL * spread));
+  let tx = N / 2, ty = N / 2, zf = ZOOM_ACT;
+  if (tl) {
+    const [px, py] = playerPos(now);
+    const e = smooth(clamp((now - tl.pathEnd) / 0.35, 0, 1));
+    tx = px + 0.5 + (N / 2 - px - 0.5) * 0.45 * e;
+    ty = py + 0.5 + (N / 2 - py - 0.5) * 0.45 * e;
+    zf = ZOOM_ACT + (ZOOM_ENEMY - ZOOM_ACT) * e;
+  }
+  const dtc = Math.min(0.1, Math.max(0, now - (CAM.last == null ? now : CAM.last)));
+  CAM.last = now;
+  const k = t < 0.02 ? 1 : Math.min(1, dtc * 7);
+  CAM.fx += (tx - CAM.fx) * k; CAM.fy += (ty - CAM.fy) * k; CAM.zf += (zf - CAM.zf) * k;
+  CAM.zoom = 1 + (fit * CAM.zf - 1) * t;
   CAM.bx0 = OX + N * CELL / 2;
   CAM.by0 = OY + N * CELL / 2;
   let shx = 0, shy = 0;
@@ -957,11 +968,14 @@ function updateCam(now) {
       shy = (Math.random() - 0.5) * amp;
     }
   }
-  CAM.bx = CAM.bx0 + shx;
-  // centre the whole figure, glass cube and base together, in the space below the HUD
-  const yC = (70 + VH - 14) / 2;
-  const off = (SLAB_D - CUBE_H) * Math.cos(PITCH_FLY) * CELL * CAM.zoom / 2 * t;
-  CAM.by = CAM.by0 + t * (yC - CAM.by0) - off + shy;
+  // put the followed point on the middle of the screen (below the HUD)
+  const half = Math.max(2.5, VW / (CELL * CAM.zoom) / 2 / spread);
+  const fx = clamp(CAM.fx, Math.min(half, N / 2), Math.max(N - half, N / 2)), fy = clamp(CAM.fy, 2.5, N - 2.5);
+  const uf = X(fx) - CAM.bx0, vf = Y(fy) - CAM.by0, z = CAM.zoom;
+  const bxF = VW / 2 - (uf * CAM.c - vf * CAM.s) * z;
+  const byF = (70 + VH - 14) / 2 + 0.06 * VH - (uf * CAM.s + vf * CAM.c) * CAM.sinP * z + 1.9 * CELL * CAM.cosP * z;
+  CAM.bx = CAM.bx0 + t * (bxF - CAM.bx0) + shx;
+  CAM.by = CAM.by0 + t * (byF - CAM.by0) + shy;
 }
 // board cell units (x, y, height in cells) -> screen pixels
 function proj(x, y, z) {
@@ -987,26 +1001,6 @@ function area(pts) {
 }
 
 // ---------------------------------------------------------------- sky, the cube, the base
-let cloudSprites = null;
-function buildClouds() {
-  const out = [];
-  for (let k = 0; k < 3; k++) {
-    const c = document.createElement('canvas');
-    c.width = 320; c.height = 150;
-    const g = c.getContext('2d');
-    for (let i = 0; i < 9; i++) {
-      const x = 50 + i * 27 + hash2(k, i) * 20, y = 85 - Math.sin(i / 8 * Math.PI) * 28 + (hash2(i, k + 5) - 0.5) * 24, r = 26 + hash2(k + 3, i) * 26;
-      const gr = g.createRadialGradient(x, y, 0, x, y, r);
-      gr.addColorStop(0, 'rgba(255,255,255,0.95)');
-      gr.addColorStop(0.6, 'rgba(255,255,255,0.55)');
-      gr.addColorStop(1, 'rgba(255,255,255,0)');
-      g.fillStyle = gr;
-      g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
-    }
-    out.push(c);
-  }
-  return out;
-}
 // the room around the diorama: pale, with the model's shadow on the table
 function drawRoom() {
   const g = ctx.createLinearGradient(0, 0, 0, VH);
@@ -1028,9 +1022,6 @@ function drawRoom() {
   }
 }
 const CUBE_FACES = [[[0, N], [N, N]], [[N, N], [N, 0]], [[N, 0], [0, 0]], [[0, 0], [0, N]]];  // south, east, north, west
-const CUBE_CLOUDS = Array.from({ length: 9 }, (_, i) => ({
-  x: 0.6 + hash2(i, 31) * (N - 1.2), y: 0.6 + hash2(i, 32) * (N - 1.2), z: 0.9 + hash2(i, 33) * (CUBE_H - 1.4), sp: i % 3, sc: 1.7 + hash2(i, 34) * 1.6,
-}));
 function cubeQuad(f) {
   const [a, b] = f;
   return [proj(a[0], a[1], 0), proj(b[0], b[1], 0), proj(b[0], b[1], CUBE_H), proj(a[0], a[1], CUBE_H)];
@@ -1038,29 +1029,15 @@ function cubeQuad(f) {
 // the far walls of the glass cube: the sky seen from inside
 function drawCubeBack(now) {
   if (CAM.t < 0.02) return;
-  if (!cloudSprites) cloudSprites = buildClouds();
   ctx.globalAlpha = CAM.t;
   CUBE_FACES.forEach((f, fi) => {
     const q = cubeQuad(f);
     if (area(q) <= 0.5) return;
     const g = ctx.createLinearGradient(0, q[3][1], 0, q[0][1]);
-    g.addColorStop(0, '#4a98e2'); g.addColorStop(0.7, '#94c9f2'); g.addColorStop(1, '#cfe7fa');
+    g.addColorStop(0, '#3d8cdc'); g.addColorStop(0.55, '#79b8ee'); g.addColorStop(1, '#d4eafb');
     ctx.fillStyle = g;
     poly(q);
     ctx.fill();
-    // clouds on the far glass
-    ctx.save();
-    poly(q);
-    ctx.clip();
-    for (let i = 0; i < 4; i++) {
-      const s0 = hash2(fi * 7 + i, 41), v0 = 0.15 + 0.6 * hash2(fi * 7 + i, 42);
-      const px = q[0][0] + (q[1][0] - q[0][0]) * s0 + (q[3][0] - q[0][0]) * v0;
-      const py = q[0][1] + (q[1][1] - q[0][1]) * s0 + (q[3][1] - q[0][1]) * v0;
-      const w = Math.abs(q[1][0] - q[0][0]) * (0.25 + 0.2 * hash2(fi, i + 50));
-      ctx.globalAlpha = CAM.t * (0.55 + 0.35 * hash2(i, fi));
-      ctx.drawImage(cloudSprites[(fi + i) % 3], px - w / 2, py - w * 0.24, w, w * 0.47);
-    }
-    ctx.restore();
   });
   ctx.globalAlpha = 1;
 }
@@ -1323,34 +1300,76 @@ function trailPoint(t) {
 }
 
 // ---------------------------------------------------------------- terrain
-function wallHeight(x, y) { return 0.42 + 0.5 * hash2(x * 17 + 3, y * 11 + 5); }
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), fx = smooth(x - xi), fy = smooth(y - yi);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+// neighbouring islands rise and fall together, like hills
+function wallHeight(x, y) { return 0.42 + 1.0 * vnoise(x * 0.62 + 3.1, y * 0.62 + 7.7); }
+const isWall = (x, y) => inB(x, y) && cellType(x, y) === 1;
+function rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function mixc(a, b, t) { const A = rgb(a), B = typeof b === 'string' ? rgb(b) : b; return `rgb(${Math.round(A[0] + (B[0] - A[0]) * t)},${Math.round(A[1] + (B[1] - A[1]) * t)},${Math.round(A[2] + (B[2] - A[2]) * t)})`; }
 function drawBlock(x, y) {
   const h = wallHeight(x, y);
   const hv = hash2(x * 7 + 1, y * 5 + 9);
-  const top = ART.moss[Math.floor(hv * 3) % 3];
+  const hi = clamp((h - 0.42) / 1.0, 0, 1);               // 0 low shore .. 1 high crag
+  const topA = mixc('#86b44e', '#c4d27a', hi * 0.8);
+  const topB = mixc('#5f9236', '#8fb25a', hi * 0.8);
   const sides = [
-    [[x, y + 1], [x + 1, y + 1], ART.rock],
-    [[x + 1, y + 1], [x + 1, y], ART.rockDark],
-    [[x + 1, y], [x, y], ART.rockDark],
-    [[x, y], [x, y + 1], '#7b6e63'],
+    [[x, y + 1], [x + 1, y + 1], '#a89a8c', 0, 1],
+    [[x + 1, y + 1], [x + 1, y], '#7d7066', 1, 0],
+    [[x + 1, y], [x, y], '#6b5f56', 0, -1],
+    [[x, y], [x, y + 1], '#8a7c70', -1, 0],
   ];
-  for (const [a, b, col] of sides) {
-    const Ba = proj(a[0], a[1], 0), Bb = proj(b[0], b[1], 0), Tb = proj(b[0], b[1], h), Ta = proj(a[0], a[1], h);
+  for (let si = 0; si < 4; si++) {
+    const [a, b, col, nx, ny] = sides[si];
+    const nh = isWall(x + nx, y + ny) ? wallHeight(x + nx, y + ny) : 0;
+    if (nh >= h) continue;
+    const Ba = proj(a[0], a[1], nh), Bb = proj(b[0], b[1], nh), Tb = proj(b[0], b[1], h), Ta = proj(a[0], a[1], h);
     const quad = [Ba, Bb, Tb, Ta];
     if (area(quad) >= -0.5) continue;
-    ctx.fillStyle = col;
+    const mx = (Ta[0] + Tb[0]) / 2, my = (Ta[1] + Tb[1]) / 2, bx = (Ba[0] + Bb[0]) / 2, by = (Ba[1] + Bb[1]) / 2;
+    const gr = ctx.createLinearGradient(mx, my, bx, by);
+    gr.addColorStop(0, mixc(col, '#ffffff', 0.22));
+    gr.addColorStop(0.5, col);
+    gr.addColorStop(1, mixc(col, '#2c3a4a', nh ? 0.2 : 0.5));
+    ctx.fillStyle = gr;
     poly(quad);
     ctx.fill();
-    // the foot of the cliff is darker
-    ctx.fillStyle = 'rgba(60,48,40,0.38)';
-    poly([Ba, Bb, [Bb[0] + (Tb[0] - Bb[0]) * 0.45, Bb[1] + (Tb[1] - Bb[1]) * 0.45], [Ba[0] + (Ta[0] - Ba[0]) * 0.45, Ba[1] + (Ta[1] - Ba[1]) * 0.45]]);
-    ctx.fill();
-    // moss that has crept over the lip
-    const q2 = [proj(a[0], a[1], h * 0.8), proj(b[0], b[1], h * 0.8), Tb, Ta];
-    ctx.fillStyle = ART.mossDark;
-    poly(q2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(40,30,25,0.35)';
+    const P = (u, v) => { const tx = Ta[0] + (Tb[0] - Ta[0]) * u, ty = Ta[1] + (Tb[1] - Ta[1]) * u; return [tx + ((Ba[0] + (Bb[0] - Ba[0]) * u) - tx) * v, ty + ((Ba[1] + (Bb[1] - Ba[1]) * u) - ty) * v]; };
+    ctx.save();
+    poly(quad);
+    ctx.clip();
+    // strata and cracks
+    ctx.lineWidth = 1;
+    for (let k = 1; k <= 3; k++) {
+      const v = (k + 0.3 * hash2(x * 3 + k, y * 5 + si)) / 4.2;
+      const l = P(0, v), r = P(1, v);
+      ctx.strokeStyle = 'rgba(40,30,28,0.22)';
+      ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(r[0], r[1]); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.beginPath(); ctx.moveTo(l[0], l[1] + 1.5); ctx.lineTo(r[0], r[1] + 1.5); ctx.stroke();
+    }
+    const cu = 0.2 + 0.6 * hash2(x * 9 + si, y * 4);
+    const c0 = P(cu, 0.15), c1 = P(cu + 0.06, 0.55), c2 = P(cu - 0.03, 0.9);
+    ctx.strokeStyle = 'rgba(30,22,20,0.3)';
+    ctx.beginPath(); ctx.moveTo(c0[0], c0[1]); ctx.lineTo(c1[0], c1[1]); ctx.lineTo(c2[0], c2[1]); ctx.stroke();
+    // moss spilling over the lip, ragged
+    ctx.fillStyle = '#4f8a2e';
+    ctx.beginPath();
+    ctx.moveTo(Ta[0], Ta[1]); ctx.lineTo(Tb[0], Tb[1]);
+    for (let k = 8; k >= 0; k--) { const u = k / 8; const q = P(u, 0.1 + 0.2 * hash2(x * 13 + k, y * 7 + si)); ctx.lineTo(q[0], q[1]); }
+    ctx.closePath(); ctx.fill();
+    // surf where the cliff meets the water
+    if (!nh) {
+      const f0 = P(0, 0.9), f1 = P(1, 0.9);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      poly([Ba, Bb, f1, f0]);
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(35,26,22,0.4)';
     ctx.lineWidth = 1;
     poly(quad);
     ctx.stroke();
@@ -1366,35 +1385,52 @@ function drawBlock(x, y) {
     poly([proj(x + 1, y, h), proj(x + 1 + dx, y + dy, h), proj(x + 1 + dx, y + 1 + dy, h), proj(x + 1, y + 1, h)]);
     ctx.fill();
   }
-  ctx.fillStyle = top;
+  const tg = ctx.createLinearGradient(T[0][0], T[0][1], T[2][0], T[2][1]);
+  tg.addColorStop(0, topA); tg.addColorStop(1, topB);
+  ctx.fillStyle = tg;
   poly(T);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(40,70,25,0.5)';
+  // sunlit rim on the near-left edges
+  ctx.strokeStyle = 'rgba(255,255,210,0.38)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(T[3][0], T[3][1]); ctx.lineTo(T[0][0], T[0][1]); ctx.lineTo(T[1][0], T[1][1]); ctx.stroke();
+  ctx.strokeStyle = 'rgba(40,70,25,0.45)';
   ctx.lineWidth = 1;
+  poly(T);
   ctx.stroke();
-  // grass tufts
-  ctx.fillStyle = 'rgba(48,86,30,0.35)';
-  for (let i = 0; i < 3; i++) {
-    const [px, py] = proj(x + 0.2 + 0.6 * hash2(x + i * 5, y * 3 + 1), y + 0.2 + 0.6 * hash2(x * 3 + 2, y + i * 7), h);
-    ctx.beginPath(); ctx.arc(px, py, Math.max(2, CELL * 0.08), 0, TAU); ctx.fill();
+  // mottled grass
+  for (let i = 0; i < 5; i++) {
+    const [px, py] = proj(x + 0.15 + 0.7 * hash2(x + i * 5, y * 3 + 1), y + 0.15 + 0.7 * hash2(x * 3 + 2, y + i * 7), h);
+    ctx.fillStyle = i % 2 ? 'rgba(40,84,28,0.3)' : 'rgba(210,235,120,0.28)';
+    ctx.beginPath(); ctx.arc(px, py, Math.max(2, CELL * (0.06 + 0.05 * hash2(i, x + y))), 0, TAU); ctx.fill();
   }
-  // a pine or two
-  if (hv > 0.5) {
-    const n = hv > 0.85 ? 2 : 1;
+  // pines, and a boulder on the high ground
+  if (hv > 0.35) {
+    const n = hv > 0.8 ? 3 : hv > 0.6 ? 2 : 1;
     for (let i = 0; i < n; i++) {
-      const [px, py] = proj(x + 0.3 + 0.4 * hash2(x + i, y * 9), y + 0.3 + 0.4 * hash2(x * 9 + i, y), h);
-      const hgt = CELL * 0.42 * (0.3 + 0.7 * CAM.t) * CAM.zoom, wd = CELL * 0.13 * CAM.zoom;
-      ctx.fillStyle = '#2f5f2a';
-      ctx.beginPath(); ctx.arc(px, py - hgt * 0.2, wd, 0, TAU); ctx.fill();
-      if (CAM.t > 0.15) {
-        ctx.globalAlpha = Math.min(1, CAM.t * 1.5);
-        ctx.fillStyle = '#3f7a35';
-        ctx.beginPath(); ctx.moveTo(px, py - hgt); ctx.lineTo(px + wd * 1.1, py - hgt * 0.1); ctx.lineTo(px - wd * 1.1, py - hgt * 0.1); ctx.closePath(); ctx.fill();
-        ctx.fillStyle = '#2f5f2a';
-        ctx.beginPath(); ctx.moveTo(px, py - hgt * 0.75); ctx.lineTo(px + wd * 1.35, py + hgt * 0.1); ctx.lineTo(px - wd * 1.35, py + hgt * 0.1); ctx.closePath(); ctx.fill();
-        ctx.globalAlpha = 1;
+      const [px, py] = proj(x + 0.25 + 0.5 * hash2(x + i, y * 9), y + 0.25 + 0.5 * hash2(x * 9 + i, y), h);
+      const sc = (0.75 + 0.5 * hash2(i + x, y)) * (hi > 0.6 ? 0.8 : 1);
+      const hgt = CELL * 0.62 * sc * (0.3 + 0.7 * CAM.t) * CAM.zoom, wd = CELL * 0.17 * sc * CAM.zoom;
+      if (CAM.t < 0.15) { ctx.fillStyle = '#2f5f2a'; ctx.beginPath(); ctx.arc(px, py, wd * 0.9, 0, TAU); ctx.fill(); continue; }
+      ctx.globalAlpha = Math.min(1, CAM.t * 1.5);
+      ctx.fillStyle = 'rgba(20,40,20,0.3)';
+      ctx.beginPath(); ctx.ellipse(px + wd * 0.5, py + 1, wd * 1.3, wd * 0.45, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#6b4a2e';
+      ctx.fillRect(px - 1.2, py - hgt * 0.2, 2.4, hgt * 0.2);
+      for (let L = 0; L < 3; L++) {
+        const yb = py - hgt * (0.12 + 0.28 * L), yt = py - hgt * (0.55 + 0.22 * L), w = wd * (1.35 - 0.3 * L);
+        ctx.fillStyle = mixc('#2c6a30', '#58a04a', L / 2.5);
+        ctx.beginPath(); ctx.moveTo(px, yt - hgt * 0.1); ctx.lineTo(px + w, yb); ctx.lineTo(px - w, yb); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = 'rgba(0,30,10,0.28)';
+        ctx.beginPath(); ctx.moveTo(px, yt - hgt * 0.1); ctx.lineTo(px + w, yb); ctx.lineTo(px, yb); ctx.closePath(); ctx.fill();
       }
+      ctx.globalAlpha = 1;
     }
+  } else {
+    const [px, py] = proj(x + 0.5, y + 0.5, h);
+    const r = CELL * 0.14 * CAM.zoom;
+    ctx.fillStyle = '#9a8f86'; ctx.beginPath(); ctx.ellipse(px, py, r * 1.3, r * 0.8, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.beginPath(); ctx.ellipse(px - r * 0.3, py - r * 0.25, r * 0.6, r * 0.3, 0, 0, TAU); ctx.fill();
   }
 }
 // a column of swirling air that throws a plane back
@@ -1518,34 +1554,77 @@ let seaCache = null;
 function seaImage() {
   const key = G.arenaId + '|' + CELL + '|' + DPR;
   if (seaCache && seaCache.key === key) return seaCache.c;
+  const W = Math.round(CELL * N * DPR);
   const c = document.createElement('canvas');
-  c.width = Math.round(CELL * N * DPR); c.height = Math.round(CELL * N * DPR);
+  c.width = W; c.height = W;
   const g = c.getContext('2d');
-  g.scale(DPR, DPR);
-  g.fillStyle = ART.seaBase;
-  g.fillRect(0, 0, CELL * N, CELL * N);
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const t = G.grid[y * N + x];
-      if (t === 1) { g.fillStyle = ART.sand; g.fillRect(x * CELL, y * CELL, CELL, CELL); continue; }
-      g.fillStyle = ART.sea[(x + y) % 2];
-      g.fillRect(x * CELL, y * CELL, CELL, CELL);
-      let near = 0;
-      for (const [dx, dy] of DIRS4) if (inB(x + dx, y + dy) && cellType(x + dx, y + dy) === 1) near += 0.4;
-      for (const [dx, dy] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) if (inB(x + dx, y + dy) && cellType(x + dx, y + dy) === 1) near += 0.13;
-      if (near > 0) { g.fillStyle = `rgba(222,204,150,${Math.min(0.62, near)})`; g.fillRect(x * CELL, y * CELL, CELL, CELL); }
+  // depth field: shallow turquoise and sand near land, deepening to open water, with broad swells of colour
+  const R = 10, S = N * R;
+  const f = document.createElement('canvas');
+  f.width = S; f.height = S;
+  const fg = f.getContext('2d');
+  const img = fg.createImageData(S, S);
+  const land = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (G.grid[y * N + x] === 1) land.push([x, y]);
+  const stops = [[0, [218, 202, 150]], [0.1, [192, 198, 152]], [0.3, [70, 172, 198]], [0.8, [50, 152, 200]], [1.8, [38, 120, 184]], [3.2, [27, 92, 158]]];
+  for (let py = 0; py < S; py++) {
+    for (let px = 0; px < S; px++) {
+      const cx = (px + 0.5) / R, cy = (py + 0.5) / R;
+      let d = 9;
+      for (const [lx, ly] of land) {
+        const dx = Math.max(lx - cx, 0, cx - lx - 1), dy = Math.max(ly - cy, 0, cy - ly - 1);
+        const dd = dx * dx + dy * dy;
+        if (dd < d * d) d = Math.sqrt(dd);
+      }
+      let i = 0;
+      while (i < stops.length - 2 && d > stops[i + 1][0]) i++;
+      const t = clamp((d - stops[i][0]) / (stops[i + 1][0] - stops[i][0]), 0, 1), A = stops[i][1], B = stops[i + 1][1];
+      const n = (vnoise(cx * 0.5, cy * 0.5) - 0.5) * 16 + (0.5 - (cx + cy) / (2 * N)) * 14;
+      const o = (py * S + px) * 4;
+      let foam = d < 0.22 ? Math.pow(1 - d / 0.22, 2) * (0.5 + 0.5 * Math.sin(d * 40 + vnoise(cx * 2, cy * 2) * 6)) * 0.32 : 0;
+      for (let k = 0; k < 3; k++) {
+        const v = A[k] + (B[k] - A[k]) * t + n * (d > 0.3 ? 1 : 0.2);
+        img.data[o + k] = clamp(v + (255 - v) * foam, 0, 255);
+      }
+      img.data[o + 3] = 255;
     }
   }
+  fg.putImageData(img, 0, 0);
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(f, 0, 0, W, W);
+  g.scale(DPR, DPR);
+  // the water's own light: soft diagonal bands and glints
+  g.globalAlpha = 0.07;
+  g.fillStyle = '#ffffff';
+  for (let k = -N; k < N * 2; k += 3) {
+    g.beginPath(); g.moveTo(k * CELL, 0); g.lineTo((k + 1.2) * CELL, 0); g.lineTo((k + 1.2 - N) * CELL, N * CELL); g.lineTo((k - N) * CELL, N * CELL); g.closePath(); g.fill();
+  }
+  g.globalAlpha = 1;
+  g.strokeStyle = 'rgba(255,255,255,0.2)';
+  g.lineWidth = 1.2;
+  g.lineCap = 'round';
+  g.beginPath();
+  for (let i = 0; i < N * N * 0.7; i++) {
+    const gx = hash2(i, 101) * N, gy = hash2(i, 102) * N;
+    if (G.grid[Math.floor(gy) * N + Math.floor(gx)] === 1) continue;
+    const l = 0.18 + 0.22 * hash2(i, 103);
+    g.moveTo(gx * CELL, gy * CELL); g.lineTo((gx + l) * CELL, (gy + 0.02) * CELL);
+  }
+  g.stroke();
   g.strokeStyle = ART.grid;
   g.lineWidth = 1;
   g.beginPath();
   for (let i = 0; i <= N; i++) { g.moveTo(i * CELL, 0); g.lineTo(i * CELL, N * CELL); g.moveTo(0, i * CELL); g.lineTo(N * CELL, i * CELL); }
   g.stroke();
-  g.fillStyle = 'rgba(8,30,66,0.24)';
-  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
-    if (G.grid[y * N + x] !== 1) continue;
-    const h = wallHeight(x, y);
-    g.fillRect((x + h * 0.4) * CELL, (y + h * 0.32) * CELL, CELL, CELL);
+  // each island throws a soft shadow across the water
+  for (let pass = 0; pass < 3; pass++) {
+    g.fillStyle = `rgba(6,28,60,${0.1 - pass * 0.02})`;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      if (G.grid[y * N + x] !== 1) continue;
+      const h = wallHeight(x, y), k = 0.55 + pass * 0.22;
+      g.fillRect((x + h * 0.4 * k) * CELL, (y + h * 0.32 * k) * CELL, CELL, CELL);
+    }
   }
   seaCache = { key, c };
   return c;
@@ -1602,7 +1681,19 @@ function draw() {
   groundOn();
   // nearest-neighbour keeps the tilted blit cheap on slow machines; the sea is flat colour, so it costs little in looks
   ctx.imageSmoothingEnabled = CAM.t < 0.01;
-  ctx.drawImage(seaImage(), OX, OY, CELL * N, CELL * N);
+  {
+    // only the part of the sea that is on screen
+    const img = seaImage(), M = ctx.getTransform(), det = M.a * M.d - M.b * M.c;
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const [sx, sy] of [[0, 0], [VW, 0], [VW, VH], [0, VH]]) {
+      const px = sx * DPR - M.e, py = sy * DPR - M.f;
+      const gx = (M.d * px - M.c * py) / det, gy = (-M.b * px + M.a * py) / det;
+      x0 = Math.min(x0, gx); x1 = Math.max(x1, gx); y0 = Math.min(y0, gy); y1 = Math.max(y1, gy);
+    }
+    x0 = clamp(Math.floor(x0 - 2), OX, OX + CELL * N); x1 = clamp(Math.ceil(x1 + 2), OX, OX + CELL * N);
+    y0 = clamp(Math.floor(y0 - 2), OY, OY + CELL * N); y1 = clamp(Math.ceil(y1 + 2), OY, OY + CELL * N);
+    if (x1 > x0 && y1 > y0) ctx.drawImage(img, (x0 - OX) * DPR, (y0 - OY) * DPR, (x1 - x0) * DPR, (y1 - y0) * DPR, x0, y0, x1 - x0, y1 - y0);
+  }
   ctx.imageSmoothingEnabled = true;
   // light moving on the water
   ctx.strokeStyle = 'rgba(255,255,255,0.14)';
@@ -1774,20 +1865,6 @@ function draw() {
   if (G.edgeBounce) {
     const walls = [[[0, 0], [N, 0]], [[N, 0], [N, N]], [[N, N], [0, N]], [[0, N], [0, 0]]];
     for (const [a, b] of walls) objs.push({ d: depthOf((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), f: () => windWall(a, b, now), wall: true });
-  }
-  // clouds drifting inside the cube
-  if (CAM.t > 0.02) {
-    if (!cloudSprites) cloudSprites = buildClouds();
-    for (const c of CUBE_CLOUDS) {
-      const cx0 = c.x + 0.35 * Math.sin(now * 0.12 + c.z * 3);
-      objs.push({ d: depthOf(cx0, c.y) + CELL * c.z * 0.2, f: () => {
-        const [sx, sy] = proj(cx0, c.y, c.z);
-        const w = CELL * CAM.zoom * c.sc;
-        ctx.globalAlpha = 0.82 * CAM.t;
-        ctx.drawImage(cloudSprites[c.sp], sx - w / 2, sy - w * 0.24, w, w * 0.47);
-        ctx.globalAlpha = 1;
-      } });
-    }
   }
   for (const j of jets) {
     objs.push({ d: depthOf(j.x, j.y) + CELL * 0.45, f: () => {
