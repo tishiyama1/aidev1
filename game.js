@@ -8,13 +8,18 @@ let VW = 0, VH = 0, DPR = 1, SCALE = 24;
 
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
-  VW = window.innerWidth;
-  VH = window.innerHeight;
+  // size to what is actually shown (100vh on mobile Safari runs behind the toolbars)
+  const r = canvas.getBoundingClientRect();
+  VW = Math.round(r.width) || window.innerWidth;
+  VH = Math.round(r.height) || window.innerHeight;
   canvas.width = Math.round(VW * DPR);
   canvas.height = Math.round(VH * DPR);
   SCALE = Math.max(16, Math.min(VW, VH) / 17);
+  titleCache = null;
 }
 window.addEventListener('resize', resize);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
+let titleCache = null;
 resize();
 
 // ============================================================ utils
@@ -25,6 +30,264 @@ const TAU = Math.PI * 2;
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = a[i]; a[i] = a[j]; a[j] = t; }
   return a;
+}
+
+// ============================================================ art direction
+// Palette and forms follow the reference poster (design/zankyo-art.md):
+// ink-blue black, bone white, cold teal, and crimson used only as thin lines.
+const ART = {
+  ink: '#02060a', bone: '#e9e2d0', boneDim: '#b9b3a2', rock: '#1d3d48', rockDot: '#c4dcd6',
+  wall: '#dfe6da', teal: '#58f0d4', crim: '#e02a2a', crimDeep: '#9c1212', rust: '#d9663a',
+  crystal: '#a9b4ff', water: '#4fb0c0',
+};
+const SERIF = '"Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif';
+const KANJI_DIGITS = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+function kanjiNum(n) {
+  if (n < 10) return KANJI_DIGITS[n];
+  if (n < 20) return '十' + (n % 10 ? KANJI_DIGITS[n % 10] : '');
+  if (n < 100) return KANJI_DIGITS[Math.floor(n / 10)] + '十' + (n % 10 ? KANJI_DIGITS[n % 10] : '');
+  return String(n);
+}
+
+// film grain: one small noise tile, laid over the screen with a new offset every frame
+const grainTile = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 160;
+  const g = c.getContext('2d');
+  const im = g.createImageData(160, 160);
+  for (let i = 0; i < im.data.length; i += 4) {
+    const v = Math.pow(Math.random(), 3) * 255;
+    im.data[i] = v; im.data[i + 1] = v; im.data[i + 2] = v; im.data[i + 3] = Math.random() < 0.5 ? 255 : 90;
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+})();
+// the same, as sparse faint specks that can be laid over the screen with plain alpha (cheap)
+const grainSpecks = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  const im = g.createImageData(256, 256);
+  for (let i = 0; i < im.data.length; i += 4) {
+    im.data[i] = 214; im.data[i + 1] = 226; im.data[i + 2] = 220;
+    im.data[i + 3] = Math.pow(Math.random(), 5) * 36;
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+})();
+const whale = { a: 0, swim: 0 };
+function updateWhale(dt) {
+  const p = G.player;
+  if (!p) return;
+  const sp = Math.hypot(p.vx, p.vy);
+  if (sp > 0.3) {
+    const target = Math.atan2(p.vy, p.vx);
+    let d = target - whale.a;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    whale.a += d * Math.min(1, dt * 9);
+  }
+  whale.swim += dt * (2.2 + sp * 1.6);
+}
+
+// drifting marine snow (screen space, with a little parallax against the camera)
+const SNOW = Array.from({ length: 70 }, () => ({
+  x: Math.random(), y: Math.random(), z: 0.3 + Math.random() * 0.7, ph: Math.random() * 6.28, r: Math.random() < 0.15 ? 1.6 : 0.9,
+}));
+let snowCamX = 0, snowCamY = 0, snowNow = 0;
+
+// cracks that creep in from the screen edges when something hunts nearby
+const CRACKS = (() => {
+  const out = [];
+  const rnd = (() => { let a = 20260414; return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })();
+  for (let side = 0; side < 4; side++) {
+    for (let n = 0; n < 5; n++) {
+      // points are in unit space: u along the edge (0..1), v depth from the edge (0..1)
+      const pts = [];
+      let u = 0.06 + rnd() * 0.88, v = 0;
+      const drift = (rnd() - 0.5) * 0.5;
+      const len = 0.18 + rnd() * 0.3;
+      const steps = 14;
+      for (let i = 0; i <= steps; i++) {
+        pts.push([u, v, rnd()]);
+        v += len / steps * (0.7 + rnd() * 0.6);
+        u += (drift / steps) + (rnd() - 0.5) * 0.035;
+      }
+      out.push({ side, pts, th: rnd(), w: 0.7 + rnd() * 1.1 });
+    }
+  }
+  return out;
+})();
+
+function drawCracks(level, now) {
+  if (level <= 0.02) return;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = ART.crim;
+  const m = Math.min(VW, VH);
+  const pulse = 0.85 + 0.15 * Math.sin(now * 7);
+  for (const c of CRACKS) {
+    const f = clamp(level * 1.25 + 0.05 - c.th * 0.85, 0, 1);
+    if (f <= 0.01) continue;
+    const n = Math.max(2, Math.ceil(f * c.pts.length));
+    const place = ([u, v]) => {
+      const d = v * m;
+      switch (c.side) {
+        case 0: return [u * VW, d];
+        case 1: return [VW - d, u * VH];
+        case 2: return [u * VW, VH - d];
+        default: return [d, u * VH];
+      }
+    };
+    ctx.globalAlpha = clamp(0.2 + level * 0.5, 0, 0.8) * pulse;
+    ctx.lineWidth = c.w * (0.8 + level * 0.6);
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const [x, y] = place(c.pts[i]);
+      if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+    // fine serration along the crack, like the hair on the poster's tear
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    for (let i = 1; i < n; i++) {
+      const [x, y] = place(c.pts[i]);
+      const [x0, y0] = place(c.pts[i - 1]);
+      const tx = x - x0, ty = y - y0, L = Math.hypot(tx, ty) || 1;
+      const nx = -ty / L, ny = tx / L, k = 4 + 9 * c.pts[i][2];
+      ctx.moveTo(x, y); ctx.lineTo(x + nx * k + tx / L * 3, y + ny * k + ty / L * 3);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.lineCap = 'butt';
+}
+
+// the whale: a plain bone-white silhouette that faces the way it swims
+function drawWhale(x, y, ang, len, swim, a) {
+  const L = len;
+  const sw = Math.sin(swim) * 0.07 * L;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ang);
+  ctx.scale(1, 1.2);
+  ctx.globalAlpha = a;
+  ctx.fillStyle = ART.bone;
+  ctx.beginPath();
+  ctx.moveTo(L * 0.5, 0.01 * L);
+  ctx.bezierCurveTo(L * 0.5, -0.12 * L, L * 0.34, -0.16 * L, L * 0.14, -0.13 * L);
+  ctx.bezierCurveTo(-0.08 * L, -0.11 * L, -0.26 * L, -0.07 * L + sw * 0.3, -0.38 * L, -0.025 * L + sw * 0.6);
+  // tail flukes
+  ctx.lineTo(-0.5 * L, -0.15 * L + sw);
+  ctx.quadraticCurveTo(-0.45 * L, 0.0 + sw, -0.5 * L, 0.15 * L + sw);
+  ctx.lineTo(-0.38 * L, 0.03 * L + sw * 0.6);
+  ctx.bezierCurveTo(-0.26 * L, 0.07 * L + sw * 0.3, -0.06 * L, 0.11 * L, 0.14 * L, 0.125 * L);
+  ctx.bezierCurveTo(0.34 * L, 0.14 * L, 0.5 * L, 0.1 * L, L * 0.5, 0.01 * L);
+  ctx.closePath();
+  ctx.fill();
+  // flipper
+  ctx.beginPath();
+  ctx.moveTo(0.12 * L, 0.1 * L);
+  ctx.quadraticCurveTo(0.04 * L, 0.2 * L + sw * 0.4, -0.04 * L, 0.2 * L);
+  ctx.quadraticCurveTo(0.02 * L, 0.12 * L, 0.04 * L, 0.1 * L);
+  ctx.fill();
+  ctx.restore();
+}
+
+// crimson line-work, no fill: a ring of inward teeth with hair along its outer edge
+function drawMonsterShape(x, y, rot, a, scale, seed) {
+  const r = SCALE * 0.42 * scale;
+  const n = 13;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.lineCap = 'round';
+  // faint wide pass for glow, then the thin line
+  for (const [lw, al] of [[SCALE * 0.12, 0.16], [Math.max(1.1, SCALE * 0.045), 1]]) {
+    ctx.globalAlpha = a * al;
+    ctx.strokeStyle = ART.crim;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    // an open ring: the jaw
+    ctx.arc(0, 0, r, 0.35, TAU - 0.35);
+    // inward teeth
+    for (let i = 0; i < n; i++) {
+      const ang = 0.5 + (i / (n - 1)) * (TAU - 1.0);
+      const ln = r * (0.28 + 0.34 * hash2(i * 7 + (seed | 0), 13));
+      ctx.moveTo(Math.cos(ang) * r, Math.sin(ang) * r);
+      ctx.lineTo(Math.cos(ang + 0.07) * (r - ln), Math.sin(ang + 0.07) * (r - ln));
+    }
+    ctx.stroke();
+  }
+  // hair along the outside
+  ctx.globalAlpha = a * 0.75;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < 24; i++) {
+    const ang = 0.5 + (i / 23) * (TAU - 1.0);
+    const ln = r * (0.16 + 0.2 * hash2(i * 3 + 5, (seed | 0) + 9));
+    ctx.moveTo(Math.cos(ang) * (r + 1), Math.sin(ang) * (r + 1));
+    ctx.lineTo(Math.cos(ang + 0.1) * (r + ln), Math.sin(ang + 0.1) * (r + ln));
+  }
+  ctx.stroke();
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+// rooted listener: same hand as the rest, in rust so it never reads as a hunter
+function drawSentinel(x, y, a, scale) {
+  const r = SCALE * 0.45 * scale;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = ART.rust;
+  for (const [lw, al] of [[SCALE * 0.11, 0.14], [Math.max(1.1, SCALE * 0.04), 1]]) {
+    ctx.globalAlpha = a * al;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, TAU);
+    ctx.moveTo(x + r * 0.65, y);
+    ctx.ellipse(x, y, r * 0.65, r * 0.3, 0, 0, TAU);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = a;
+  ctx.fillStyle = ART.rust;
+  ctx.beginPath();
+  ctx.arc(x, y, r * 0.15, 0, TAU);
+  ctx.fill();
+  ctx.lineCap = 'butt';
+}
+
+// the title is cut from a worn plate: a vertical mincho, grained away
+function titleSprite() {
+  if (titleCache) return titleCache;
+  const size = Math.round(clamp(Math.min(VW, VH) * 0.17, 54, 150));
+  const c = document.createElement('canvas');
+  const w = Math.ceil(size * 1.2), h = Math.ceil(size * 2.5);
+  c.width = w * DPR; c.height = h * DPR;
+  const g = c.getContext('2d');
+  g.scale(DPR, DPR);
+  g.fillStyle = ART.bone;
+  g.font = `900 ${size}px ${SERIF}`;
+  g.textAlign = 'center';
+  g.textBaseline = 'top';
+  g.fillText('残', w / 2, 0);
+  g.fillText('響', w / 2, size * 1.15);
+  g.globalCompositeOperation = 'destination-out';
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 0.42;
+  g.fillStyle = g.createPattern(grainTile, 'repeat');
+  g.fillRect(0, 0, c.width, c.height);
+  titleCache = { c, w, h };
+  return titleCache;
+}
+
+// a small vertical run of text, top to bottom
+function verticalText(str, x, y, size, color, alpha) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.font = `600 ${size}px ${SERIF}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  let yy = y;
+  for (const ch of str) { ctx.fillText(ch, x, yy); yy += size * 1.15; }
+  ctx.globalAlpha = 1;
 }
 
 // ============================================================ audio
@@ -58,8 +321,40 @@ const Sfx = (() => {
       noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
       const d = noiseBuf.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      drone();
     }
     if (ac && ac.state === 'suspended') ac.resume();
+  }
+
+  // deep water: a very low hum and a slow wash, always just under hearing
+  function drone() {
+    const sub = ac.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.value = 46;
+    const sg = ac.createGain();
+    sg.gain.value = 0.035;
+    sub.connect(sg);
+    sg.connect(ac.destination);
+    sub.start();
+    const wash = ac.createBufferSource();
+    wash.buffer = noiseBuf;
+    wash.loop = true;
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 220;
+    const wg = ac.createGain();
+    wg.gain.value = 0.03;
+    const lfo = ac.createOscillator();
+    lfo.frequency.value = 0.07;
+    const lg = ac.createGain();
+    lg.gain.value = 0.015;
+    lfo.connect(lg);
+    lg.connect(wg.gain);
+    lfo.start();
+    wash.connect(lp);
+    lp.connect(wg);
+    wg.connect(ac.destination);
+    wash.start();
   }
 
   function out(g, pan) {
@@ -119,6 +414,8 @@ const Sfx = (() => {
     ping(k) {
       const f = 1500 - 750 * k;
       tone(f, 0.22 + 0.5 * k, { vol: 0.16 + 0.12 * k, to: f * 0.72 });
+      // a lower voice under it, falling more slowly: closer to a whale's call
+      tone(f * 0.5, 0.5 + 0.9 * k, { vol: 0.05 + 0.04 * k, to: f * 0.34, attack: 0.03 });
       for (let i = 1; i <= 3; i++) {
         tone(f * 0.97, 0.18, { vol: 0.06 * (1 - i * 0.25) * (0.6 + k), delay: (0.11 + 0.12 * k) * i });
       }
@@ -478,8 +775,8 @@ function updateCrystals(dt) {
       if (c.pend <= 0 && G.state === 'play') {
         c.lastRing = G.now;
         markRock(c.tile, 1);
-        emitWave(c.ox, c.oy, { maxR: 8, speed: 12, strength: 0.85, kind: 2, alerts: true, resonate: true, src: c, color: '#b48cff' });
-        ring(c.ox, c.oy, 0.1, 1.6, 0.6, '#b48cff', 0.9, 2);
+        emitWave(c.ox, c.oy, { maxR: 8, speed: 12, strength: 0.85, kind: 2, alerts: true, resonate: true, src: c, color: ART.crystal });
+        ring(c.ox, c.oy, 0.1, 1.6, 0.6, ART.crystal, 0.9, 2);
         const sn = soundAt(c.ox, c.oy, 30);
         Sfx.crystal(Math.max(0.15, sn.v), sn.pan);
       }
@@ -601,8 +898,8 @@ function hear(m, x, y) {
     // a rooted listener: it cries out and everything nearby comes to the sound
     if (m.cd > 0) return;
     m.cd = 2.5;
-    ring(m.x, m.y, 0.2, 13, 1.5, '#ffa040', 0.85, 2.5);
-    ring(m.x, m.y, 0.2, 4, 0.8, '#ffa040', 0.9, 2);
+    ring(m.x, m.y, 0.2, 13, 1.5, ART.rust, 0.85, 2.5);
+    ring(m.x, m.y, 0.2, 4, 0.8, ART.rust, 0.9, 2);
     reveal(m, 1);
     const s = soundAt(m.x, m.y, 34);
     Sfx.alarm(Math.max(0.2, s.v), s.pan);
@@ -613,7 +910,7 @@ function hear(m, x, y) {
   }
   if (m.state !== 'hunt' && m.state !== 'alert') {
     // freezes for a moment before it charges
-    ring(m.x, m.y, 0.2, 3.2, 0.9, '#ff3b3b', 0.9, 2);
+    ring(m.x, m.y, 0.2, 3.2, 0.9, ART.crim, 0.9, 2);
     reveal(m, 1);
     const s = soundAt(m.x, m.y, 30);
     Sfx.shriek(Math.max(0.15, s.v), s.pan);
@@ -663,8 +960,8 @@ function followPath(m, speed, dt) {
     m.stepAcc -= stride;
     const loud = m.state === 'hunt';
     const wet = G.grid[Math.floor(m.y) * G.mw + Math.floor(m.x)] === 2;
-    if (wet) ring(m.x, m.y, 0.15, loud ? 2.4 : 1.8, 0.9, '#4aa3ff', 0.5, 1.2);
-    ring(m.x, m.y, 0.15, loud ? 1.5 : 1.2, loud ? 0.7 : 0.9, '#ff4a3d', loud ? 0.55 : 0.38, 1.2);
+    if (wet) ring(m.x, m.y, 0.15, loud ? 2.4 : 1.8, 0.9, ART.water, 0.5, 1.2);
+    ring(m.x, m.y, 0.15, loud ? 1.5 : 1.2, loud ? 0.7 : 0.9, '#d83a32', loud ? 0.55 : 0.38, 1.2);
     const sn = soundAt(m.x, m.y, loud ? 16 : 11);
     Sfx.mstep(sn.v * (loud ? 1 : 0.6), sn.pan);
   }
@@ -692,7 +989,7 @@ function updateMonsters(dt) {
       if (dp < 1.25) hear(m, p.x, p.y);
       if (dp < 7 && m.breathT <= 0) {
         m.breathT = rand(1.6, 2.2);
-        ring(m.x, m.y, 0.2, 1.1, 1.3, '#ffa040', 0.12 + 0.35 * (1 - dp / 7), 1);
+        ring(m.x, m.y, 0.2, 1.1, 1.3, ART.rust, 0.12 + 0.35 * (1 - dp / 7), 1);
       }
       continue;
     }
@@ -702,7 +999,7 @@ function updateMonsters(dt) {
     if (!active && dp < 5.5 && m.breathT <= 0) {
       m.breathT = rand(1.2, 1.8);
       const k = 1 - dp / 5.5;
-      ring(m.x, m.y, 0.1, 0.8, 1.1, '#ff4a3d', 0.12 + 0.3 * k, 1);
+      ring(m.x, m.y, 0.1, 0.8, 1.1, '#d83a32', 0.12 + 0.3 * k, 1);
       const sn = soundAt(m.x, m.y, 6);
       Sfx.breath(sn.v, sn.pan);
     }
@@ -746,7 +1043,7 @@ function die(m) {
   G.stateT = 0;
   G.killer = m;
   G.player.charging = false;
-  ring(G.player.x, G.player.y, 0.2, 9, 1.6, '#ff2a2a', 0.9, 3);
+  ring(G.player.x, G.player.y, 0.2, 9, 1.6, ART.crim, 0.9, 3);
   for (const o of G.monsters) reveal(o, 1);
   Sfx.death();
 }
@@ -779,7 +1076,7 @@ function releaseCharge(src) {
   const R = pingRadius(p.chargeT);
   const k = clamp(p.chargeT / 1.1, 0, 1);
   emitWave(p.x, p.y, { maxR: R, speed: 15, strength: 1, kind: 0, alerts: true, resonate: true });
-  ring(p.x, p.y, 0.1, 0.9 + k, 0.35, '#e8f6ff', 0.8, 2);
+  ring(p.x, p.y, 0.1, 0.9 + k, 0.35, ART.bone, 0.8, 2);
   Sfx.ping(k);
 }
 
@@ -814,7 +1111,7 @@ function updatePlayer(dt) {
       const ti = Math.floor(p.y) * G.mw + Math.floor(p.x);
       if (G.grid[ti] === 2) {
         G.waterT[ti] = G.now;
-        emitWave(p.x, p.y, { maxR: 4.6, speed: 9, strength: 0.6, kind: 0, alerts: true, ring: 0.9, bounces: 1, color: '#4aa3ff' });
+        emitWave(p.x, p.y, { maxR: 4.6, speed: 9, strength: 0.6, kind: 0, alerts: true, ring: 0.9, bounces: 1, color: ART.water });
         Sfx.splash();
       } else {
         emitWave(p.x, p.y, { maxR: 2.1, speed: 8, strength: 0.42, kind: 0, alerts: true, ring: 0.35, bounces: 0 });
@@ -828,13 +1125,14 @@ function updatePlayer(dt) {
     G.state = 'descend';
     G.stateT = 0;
     p.charging = false;
-    ring(G.exit.x, G.exit.y, 0.2, 6, 1.2, '#5dffc8', 0.9, 2.5);
+    ring(G.exit.x, G.exit.y, 0.2, 6, 1.2, ART.teal, 0.9, 2.5);
     Sfx.descend();
   }
 }
 
 // ============================================================ update
 function update(dt) {
+  updateWhale(dt);
   G.now += dt;
   G.stateT += dt;
   G.titleT += dt;
@@ -885,53 +1183,35 @@ function update(dt) {
 }
 
 // ============================================================ draw
-function drawMonsterShape(x, y, rot, a, scale) {
-  const n = 9;
-  ctx.beginPath();
-  for (let i = 0; i <= n * 2; i++) {
-    const ang = rot + (i / (n * 2)) * TAU;
-    const r = (i % 2 ? 0.2 : 0.42) * SCALE * scale;
-    const px = x + Math.cos(ang) * r, py = y + Math.sin(ang) * r;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.globalAlpha = a * 0.55;
-  ctx.fillStyle = '#5a0b0b';
-  ctx.fill();
-  ctx.globalAlpha = a;
-  ctx.strokeStyle = '#ff3f3f';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-}
-
-function drawSentinel(x, y, a, scale) {
-  const r = SCALE * 0.45 * scale;
-  ctx.globalAlpha = a * 0.5;
-  ctx.fillStyle = '#4a2200';
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, TAU);
-  ctx.fill();
-  ctx.globalAlpha = a;
-  ctx.strokeStyle = '#ffa040';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, TAU);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.ellipse(x, y, r * 0.65, r * 0.3, 0, 0, TAU);
-  ctx.stroke();
-  ctx.fillStyle = '#ffa040';
-  ctx.beginPath();
-  ctx.arc(x, y, r * 0.16, 0, TAU);
-  ctx.fill();
-}
-
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.globalAlpha = 1;
-  ctx.fillStyle = '#020305';
+  // deep water: a faint lift of blue-green toward the middle, black at the edges
+  const bg = ctx.createRadialGradient(VW / 2, VH * 0.55, 0, VW / 2, VH * 0.55, Math.max(VW, VH) * 0.7);
+  bg.addColorStop(0, '#04101a');
+  bg.addColorStop(0.55, '#020a10');
+  bg.addColorStop(1, ART.ink);
+  ctx.fillStyle = bg;
   ctx.fillRect(0, 0, VW, VH);
   if (!G.player) return;
+
+  // marine snow
+  {
+    const dt = Math.min(0.1, Math.max(0, G.now - snowNow));
+    snowNow = G.now;
+    const dcx = (G.cam.x - snowCamX) * SCALE, dcy = (G.cam.y - snowCamY) * SCALE;
+    snowCamX = G.cam.x; snowCamY = G.cam.y;
+    ctx.fillStyle = ART.boneDim;
+    for (const f of SNOW) {
+      f.ph += dt * (0.4 + f.z);
+      f.x += (-dcx * (0.25 + 0.3 * f.z)) / VW + Math.sin(f.ph) * 0.0004;
+      f.y += (-dcy * (0.25 + 0.3 * f.z)) / VH + dt * 0.006 * f.z;
+      f.x -= Math.floor(f.x); f.y -= Math.floor(f.y);
+      ctx.globalAlpha = 0.1 + 0.2 * f.z;
+      ctx.fillRect(f.x * VW, f.y * VH, f.r * f.z + 0.4, f.r * f.z + 0.4);
+    }
+    ctx.globalAlpha = 1;
+  }
 
   const ox = VW / 2 - G.cam.x * SCALE, oy = VH / 2 - G.cam.y * SCALE;
   const X = x => x * SCALE + ox, Y = y => y * SCALE + oy;
@@ -943,17 +1223,17 @@ function draw() {
 
   // heard rock: stippled body, so the solid side of a surface is obvious
   const st = Math.max(1.3, SCALE * 0.055);
-  ctx.fillStyle = '#8fa6ba';
+  ctx.fillStyle = ART.rockDot;
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const i = ty * G.mw + tx;
       const t = G.rockT[i];
       if (t < 0) continue;
       const ra = Math.max(0.16, G.rockS[i] * Math.exp(-(G.now - t) / 2.4) * 0.5);
-      ctx.globalAlpha = ra * 0.55;
-      ctx.fillStyle = '#26394b';
+      ctx.globalAlpha = Math.min(0.85, ra * 1.0);
+      ctx.fillStyle = ART.rock;
       ctx.fillRect(X(tx), Y(ty), SCALE + 0.5, SCALE + 0.5);
-      ctx.fillStyle = '#8fa6ba';
+      ctx.fillStyle = ART.rockDot;
       ctx.globalAlpha = ra;
       for (let k = 0; k < 7; k++) {
         const hx = 0.1 + 0.8 * hash2(tx * 5 + k, ty * 3 + 1), hy = 0.1 + 0.8 * hash2(ty * 5 + k + 77, tx * 7 + 3);
@@ -964,7 +1244,7 @@ function draw() {
 
   // heard water
   if (G.hasWater) {
-    ctx.strokeStyle = '#4aa3ff';
+    ctx.strokeStyle = ART.water;
     ctx.lineWidth = Math.max(1, SCALE * 0.04);
     for (let ty = ty0; ty <= ty1; ty++) {
       for (let tx = tx0; tx <= tx1; tx++) {
@@ -986,7 +1266,7 @@ function draw() {
   }
 
   // where you have walked
-  ctx.fillStyle = '#d4ecff';
+  ctx.fillStyle = '#9fb8b4';
   ctx.globalAlpha = 0.16;
   const fs = Math.max(1.5, SCALE * 0.06);
   for (let i = 0; i < G.trail.length; i += 2) {
@@ -998,16 +1278,27 @@ function draw() {
   // remembered surfaces: short strokes along the rock face
   const ds = Math.max(1.6, SCALE * 0.085);
   const dl = ds * 2.6;
-  const colors = ['#d4ecff', '#5dffc8', '#b48cff'];
+  const colors = [ART.wall, ART.teal, ART.crystal];
+  const sp = Math.max(1.1, SCALE * 0.04);
   for (let k = 0; k < 3; k++) {
     ctx.fillStyle = colors[k];
     for (const e of G.mem.values()) {
       if (e.k !== k) continue;
       const px = X(e.x), py = Y(e.y);
       if (px < -4 || py < -4 || px > VW + 4 || py > VH + 4) continue;
-      ctx.globalAlpha = Math.max(0.2, memAlpha(e));
+      const al = Math.max(0.2, memAlpha(e));
+      ctx.globalAlpha = al;
       if (e.side === 0) ctx.fillRect(px - ds / 2, py - dl / 2, ds, dl);
       else ctx.fillRect(px - dl / 2, py - ds / 2, dl, ds);
+      // flecks thrown off the rock face, as on the poster's cliffs
+      if (k === 0) {
+        const qx = Math.floor(e.x * 4), qy = Math.floor(e.y * 4);
+        ctx.globalAlpha = al * 0.8;
+        for (let j = 0; j < 2; j++) {
+          const fx = (hash2(qx + j * 31, qy + 7) - 0.5) * SCALE * 0.5, fy = (hash2(qy + j * 17, qx + 3) - 0.5) * SCALE * 0.5;
+          ctx.fillRect(px + fx, py + fy, sp, sp);
+        }
+      }
     }
   }
 
@@ -1018,14 +1309,17 @@ function draw() {
     const glow = age < 1.5 ? 1 - age / 1.5 : 0;
     const px = X(c.x), py = Y(c.y);
     if (glow > 0) {
-      ctx.globalAlpha = 0.35 * glow;
-      ctx.fillStyle = '#b48cff';
+      const cg = ctx.createRadialGradient(px, py, 0, px, py, SCALE * 1.5);
+      cg.addColorStop(0, 'rgba(169,180,255,0.42)');
+      cg.addColorStop(1, 'rgba(169,180,255,0)');
+      ctx.globalAlpha = glow;
+      ctx.fillStyle = cg;
       ctx.beginPath();
-      ctx.arc(px, py, SCALE * 1.1, 0, TAU);
+      ctx.arc(px, py, SCALE * 1.5, 0, TAU);
       ctx.fill();
     }
     ctx.globalAlpha = 0.55 + 0.45 * glow;
-    ctx.strokeStyle = '#c9a8ff';
+    ctx.strokeStyle = '#d6dcff';
     ctx.lineWidth = 1.5;
     const ang = Math.atan2(c.dy, c.dx);
     for (let k = -1; k <= 1; k++) {
@@ -1037,17 +1331,26 @@ function draw() {
     }
   }
 
-  // wave fronts
-  ctx.lineWidth = 1.2;
+  // wave fronts: dotted rings, with fainter ones trailing behind (the reverberation)
+  ctx.lineCap = 'round';
   for (const w of G.waves) {
-    const a = (1 - w.r / w.maxR) * 0.45 * w.strength * w.ring;
+    const a = (1 - w.r / w.maxR) * 0.5 * w.strength * w.ring;
     if (a <= 0.005) continue;
-    ctx.globalAlpha = a;
-    ctx.strokeStyle = w.color || (w.kind === 1 ? '#5dffc8' : w.kind === 2 ? '#b48cff' : '#e8f6ff');
-    ctx.beginPath();
-    ctx.arc(X(w.x), Y(w.y), w.r * SCALE, 0, TAU);
-    ctx.stroke();
+    ctx.strokeStyle = w.color || (w.kind === 1 ? ART.teal : w.kind === 2 ? ART.crystal : ART.bone);
+    const trails = w.maxR > 4 && w.ring > 0.5 ? 3 : 1;
+    for (let k = 0; k < trails; k++) {
+      const rr = w.r - k * 0.9;
+      if (rr <= 0.2) continue;
+      ctx.globalAlpha = Math.min(1, a * 1.5) * (k === 0 ? 1 : 0.5 / k);
+      ctx.lineWidth = k === 0 ? 2 : 1.3;
+      ctx.setLineDash([0.1, k === 0 ? 5.5 : 7]);
+      ctx.beginPath();
+      ctx.arc(X(w.x), Y(w.y), rr * SCALE, 0, TAU);
+      ctx.stroke();
+    }
   }
+  ctx.setLineDash([]);
+  ctx.lineCap = 'butt';
 
   // fx rings
   for (const f of G.fx) {
@@ -1064,20 +1367,34 @@ function draw() {
   // exit
   {
     const ex = X(G.exit.x), ey = Y(G.exit.y);
-    const pulse = 0.5 + 0.5 * Math.sin(G.now * 3);
-    const s = SCALE * (0.22 + 0.05 * pulse);
-    ctx.globalAlpha = 0.12 + 0.1 * pulse;
-    ctx.fillStyle = '#5dffc8';
+    const pulse = 0.5 + 0.5 * Math.sin(G.now * 2.4);
+    const halo = ctx.createRadialGradient(ex, ey, 0, ex, ey, SCALE * 1.3);
+    halo.addColorStop(0, `rgba(88,240,212,${0.28 + 0.14 * pulse})`);
+    halo.addColorStop(1, 'rgba(88,240,212,0)');
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(ex, ey, SCALE * 0.8, 0, TAU);
+    ctx.arc(ex, ey, SCALE * 1.3, 0, TAU);
     ctx.fill();
-    ctx.globalAlpha = 0.85;
-    ctx.strokeStyle = '#5dffc8';
-    ctx.lineWidth = 1.5;
+    // faint dotted rings drifting outward
+    ctx.strokeStyle = ART.teal;
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = 'round';
+    ctx.setLineDash([0.1, 5]);
+    for (let k = 0; k < 2; k++) {
+      const ph = ((G.now * 0.35 + k * 0.5) % 1);
+      ctx.globalAlpha = 0.5 * (1 - ph);
+      ctx.beginPath();
+      ctx.arc(ex, ey, SCALE * (0.25 + ph * 0.9), 0, TAU);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.lineCap = 'butt';
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = '#d8fff6';
     ctx.beginPath();
-    ctx.moveTo(ex, ey - s); ctx.lineTo(ex + s, ey); ctx.lineTo(ex, ey + s); ctx.lineTo(ex - s, ey);
-    ctx.closePath();
-    ctx.stroke();
+    ctx.arc(ex, ey, SCALE * (0.1 + 0.02 * pulse), 0, TAU);
+    ctx.fill();
   }
 
   // glimpses of monsters
@@ -1087,12 +1404,12 @@ function draw() {
     if (age > 1.8) continue;
     const a = m.seenA * (1 - age / 1.8);
     if (m.kind === 'sentinel') drawSentinel(X(m.seenX), Y(m.seenY), a, 1);
-    else drawMonsterShape(X(m.seenX), Y(m.seenY), m.face + age * 0.3, a, 1);
+    else drawMonsterShape(X(m.seenX), Y(m.seenY), m.face + age * 0.3, a, 1, G.monsters.indexOf(m) * 17 + 3);
   }
   if (G.state === 'dead' && G.killer) {
     const m = G.killer;
     if (m.kind === 'sentinel') drawSentinel(X(m.x), Y(m.y), 1, 1.2);
-    else drawMonsterShape(X(m.x), Y(m.y), G.now * 0.6, 1, 1.15 + 0.1 * Math.sin(G.now * 9));
+    else drawMonsterShape(X(m.x), Y(m.y), G.now * 0.6, 1, 1.9 + 0.12 * Math.sin(G.now * 9), G.monsters.indexOf(m) * 17 + 3);
   }
 
   // player
@@ -1100,33 +1417,32 @@ function draw() {
   if (G.state !== 'dead') {
     const px = X(p.x), py = Y(p.y);
     const shrink = G.state === 'descend' ? Math.max(0, 1 - G.stateT / 0.9) : 1;
-    const grd = ctx.createRadialGradient(px, py, 0, px, py, SCALE * 0.9);
-    grd.addColorStop(0, 'rgba(220,240,255,0.22)');
-    grd.addColorStop(1, 'rgba(220,240,255,0)');
+    const grd = ctx.createRadialGradient(px, py, 0, px, py, SCALE * 1.0);
+    grd.addColorStop(0, 'rgba(233,226,208,0.2)');
+    grd.addColorStop(1, 'rgba(233,226,208,0)');
     ctx.globalAlpha = shrink;
     ctx.fillStyle = grd;
     ctx.beginPath();
-    ctx.arc(px, py, SCALE * 0.9, 0, TAU);
+    ctx.arc(px, py, SCALE * 1.0, 0, TAU);
     ctx.fill();
-    ctx.fillStyle = '#f2fbff';
-    ctx.beginPath();
-    ctx.arc(px, py, SCALE * 0.17 * shrink, 0, TAU);
-    ctx.fill();
+    drawWhale(px, py, whale.a, SCALE * 1.2 * shrink, whale.swim, shrink);
     if (p.charging) {
       const R = pingRadius(p.chargeT);
       const k = clamp(p.chargeT / 1.1, 0, 1);
       ctx.globalAlpha = 0.18 + 0.2 * k;
-      ctx.strokeStyle = '#e8f6ff';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 6]);
+      ctx.strokeStyle = ART.bone;
+      ctx.lineWidth = 1.2;
+      ctx.lineCap = 'round';
+      ctx.setLineDash([0.1, 6]);
       ctx.beginPath();
       ctx.arc(px, py, R * SCALE, 0, TAU);
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.lineCap = 'butt';
       ctx.globalAlpha = 0.5 + 0.4 * k;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(px, py, SCALE * (0.3 + 0.1 * Math.sin(G.now * 20) * k), -Math.PI / 2, -Math.PI / 2 + TAU * k);
+      ctx.arc(px, py, SCALE * (0.62 + 0.1 * Math.sin(G.now * 20) * k), -Math.PI / 2, -Math.PI / 2 + TAU * k);
       ctx.stroke();
     }
   }
@@ -1144,7 +1460,7 @@ function draw() {
       const hx = cx + dx * t, hy = cy + dy * t;
       const ang = Math.atan2(dy, dx);
       const k = age / 1.4;
-      ctx.strokeStyle = '#5dffc8';
+      ctx.strokeStyle = ART.teal;
       ctx.lineWidth = 2;
       for (let i = 0; i < 2; i++) {
         ctx.globalAlpha = (1 - k) * (0.7 - i * 0.3);
@@ -1155,58 +1471,61 @@ function draw() {
     }
   }
 
-  // danger vignette
+  // danger: a dark crimson vignette, and thin cracks creeping in from the edges
   ctx.globalAlpha = 1;
-  const vg = ctx.createRadialGradient(VW / 2, VH / 2, Math.min(VW, VH) * 0.3, VW / 2, VH / 2, Math.max(VW, VH) * 0.75);
   let red = 0;
   if (G.state === 'play' && G.danger < 8) red = (1 - G.danger / 8) * (0.55 + 0.25 * Math.sin(G.now * 8));
-  if (G.state === 'dead') red = Math.max(0, 0.8 - G.stateT * 0.3);
+  if (G.state === 'dead') red = Math.max(0.55, 0.95 - G.stateT * 0.2);
+  const vg = ctx.createRadialGradient(VW / 2, VH / 2, Math.min(VW, VH) * 0.3, VW / 2, VH / 2, Math.max(VW, VH) * 0.75);
   vg.addColorStop(0, 'rgba(0,0,0,0)');
-  vg.addColorStop(1, `rgba(${Math.round(150 * red)},0,${Math.round(4 * (1 - red))},${0.6 + 0.25 * red})`);
+  vg.addColorStop(1, `rgba(${Math.round(70 * red)},0,${Math.round(4 * (1 - red))},${0.62 + 0.2 * red})`);
   ctx.fillStyle = vg;
   ctx.fillRect(0, 0, VW, VH);
+  drawCracks(red, G.now);
 
   // fade
   if (G.fade > 0) {
     ctx.globalAlpha = G.fade;
-    ctx.fillStyle = '#020305';
+    ctx.fillStyle = ART.ink;
     ctx.fillRect(0, 0, VW, VH);
   }
 
-  // HUD: floor
-  ctx.globalAlpha = 0.75;
-  ctx.fillStyle = '#7f95a8';
-  ctx.font = '600 15px ui-monospace, Menlo, Consolas, monospace';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText('B' + G.depth, 16, 14);
+  // film grain over everything but the type
+  {
+    const ox = -Math.floor(Math.random() * 256), oy = -Math.floor(Math.random() * 256);
+    ctx.globalAlpha = 1;
+    for (let gy = oy; gy < VH; gy += 256) for (let gx = ox; gx < VW; gx += 256) ctx.drawImage(grainSpecks, gx, gy);
+  }
 
-  // title, first moments only
+  // the floor, set vertically in the corner
+  verticalText(kanjiNum(G.depth) + '層', 26, 18, clamp(Math.min(VW, VH) * 0.034, 15, 24), ART.boneDim, 0.8);
+
+  // title, first moments only: vertical, top right, as on the poster
   if (G.titleT < 5) {
     const a = G.titleT < 1 ? G.titleT : Math.max(0, 1 - (G.titleT - 2.5) / 2.5);
-    ctx.globalAlpha = a * 0.8;
-    ctx.fillStyle = '#cfe6f5';
-    ctx.font = `200 ${Math.round(Math.min(VW, VH) * 0.09)}px "Hiragino Mincho ProN", "Yu Mincho", serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('残響', VW / 2, VH * 0.28);
+    const t = titleSprite();
+    ctx.globalAlpha = a * 0.95;
+    ctx.drawImage(t.c, VW - t.w - Math.max(18, VW * 0.04), Math.max(18, VH * 0.04), t.w, t.h);
+    ctx.globalAlpha = 1;
   }
 
   // death screen
   if (G.state === 'dead' && G.stateT > 0.7) {
     const a = clamp((G.stateT - 0.7) / 0.6, 0, 1);
-    ctx.globalAlpha = a * 0.75;
-    ctx.fillStyle = '#020305';
+    ctx.globalAlpha = a * 0.7;
+    ctx.fillStyle = ART.ink;
     ctx.fillRect(0, 0, VW, VH);
-    ctx.globalAlpha = a;
+    drawCracks(1, G.now);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#ff5a52';
-    ctx.font = `300 ${Math.round(Math.min(VW, VH) * 0.12)}px ui-monospace, Menlo, Consolas, monospace`;
-    ctx.fillText('B' + G.depth, VW / 2, VH * 0.27);
-    ctx.fillStyle = '#7f95a8';
-    ctx.font = '500 15px ui-monospace, Menlo, Consolas, monospace';
-    ctx.fillText('BEST B' + G.best, VW / 2, VH * 0.27 + Math.min(VW, VH) * 0.1);
+    const big = Math.round(Math.min(VW, VH) * 0.15);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = ART.bone;
+    ctx.font = `300 ${big}px ${SERIF}`;
+    ctx.fillText(kanjiNum(G.depth), VW / 2, VH * 0.27);
+    ctx.fillStyle = ART.boneDim;
+    ctx.font = `500 ${Math.round(big * 0.2)}px ${SERIF}`;
+    ctx.fillText('最深　' + kanjiNum(G.best), VW / 2, VH * 0.27 + big * 0.85);
   }
   ctx.globalAlpha = 1;
 }
