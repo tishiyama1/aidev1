@@ -562,6 +562,7 @@ function newRun() {
   G.corpses = [];
   G.popups = [];
   G.particles = [];
+  G.slow = [];
   G.flashes = [];
   G.rings = [];
   G.lastPath = null;
@@ -599,6 +600,19 @@ function setSpeed(i) {
   speedIdx = clamp(i, 0, 2);
   try { localStorage.setItem('kansei.speed', String(speedIdx)); } catch (e) { /* ignore */ }
 }
+// While a plane is being shot down the film slows: the game's clock runs at SLOW_RATE of real time
+// over each kill's window, eased in and out.
+const SLOW_RATE = 0.4;
+const slowW = (s, v) => { const a = clamp((v - (s.a - 0.12)) / 0.12, 0, 1), b = clamp((v - s.b) / 0.15, 0, 1); return smooth(a) * (1 - smooth(b)); };
+function slowWeight(v) { let w = 0; for (const s of G.slow) w = Math.max(w, slowW(s, v)); return w; }
+const rateAt = v => (G.slow && G.slow.length ? 1 - (1 - SLOW_RATE) * slowWeight(v) : 1);
+// how many real seconds until game-clock time v (for sounds, which play in real time)
+function realDelay(v) {
+  let d = 0, c = G.clock;
+  while (c < v) { const h = Math.min(0.02, v - c); d += h / rateAt(c + h / 2); c += h; }
+  return d;
+}
+const rd = realDelay;
 const gunTime = k => 0.3 * Math.pow(k, 0.8);     // a burst of fire before a kill
 const fallTime = k => 0.55 * Math.pow(k, 0.85);  // a downed plane's fall
 
@@ -616,6 +630,10 @@ function commit(o) {
   G.tl = { tStart: G.clock, t0: now, pathEnd: now + pathDur, enemyT, end: enemyT + 0.42 * K, step: STEP, lead: LEAD, out: OUT, k: K };
   G.lastPath = { cells: o.path.map(p => [p.x, p.y]), t: now };
   G.guns = [];
+  G.slow = o.kills.map(k => {
+    const t = now + k.step * STEP;
+    return { a: t - gunTime(K) - 0.05, b: t + 0.5 * fallTime(K), x: k.e.x + 0.5, y: k.e.y + 0.5, z: enemyAlt(k.e.id) };
+  });
   G.maneuvers = planManeuvers(o, now, STEP, !!(o.crash || o.clank));
   Sfx.move(o.speed, LEAD);
   for (const b of o.bounces) {
@@ -624,10 +642,10 @@ function commit(o) {
     G.bumpT.set(b.cell[1] * N + b.cell[0], t);
     G.rings.push({ x: b.cell[0] + 0.5, y: b.cell[1] + 0.5, t, life: 0.55, color: '#b4f2ff', r: 1.7 });
     sparks(b.cell[0] + 0.5, b.cell[1] + 0.5, 0.6, t, '#d8f8ff', 9);
-    Sfx.bounce(t - G.clock);
+    Sfx.bounce(rd(t));
   }
-  if (o.crash || o.clank) { Sfx.crash(pathDur + LEAD); G.shakeAt = now + pathDur; G.shakeAmp = 4; }
-  for (const m of G.maneuvers) Sfx.sweepUp(m.tb - m.w - G.clock, m.w * 2.4);
+  if (o.crash || o.clank) { Sfx.crash(rd(G.clock + pathDur + LEAD)); G.shakeAt = now + pathDur; G.shakeAmp = 4; }
+  for (const m of G.maneuvers) Sfx.sweepUp(rd(m.tb - m.w), m.w * 2.4);
 
   // kills
   const nk = o.kills.length + (o.stomp ? 1 : 0);
@@ -642,13 +660,13 @@ function commit(o) {
     // a burst of cannon fire, then the plane goes down trailing fire and crashes into the sea
     const gd = gunTime(K);
     G.guns.push({ x: e.x + 0.5, y: e.y + 0.5, z: enemyAlt(e.id), t0: t - gd, t1: t });
-    Sfx.gun(t - gd - G.clock, gd);
+    Sfx.gun(rd(t - gd), gd);
     const hd = e.hd == null ? 0 : e.hd;
     const drift = 1.6 + 0.6 * ((e.id * 7) % 3);
     const landX = clamp(e.x + 0.5 + Math.cos(hd) * drift, 0.5, N - 0.5), landY = clamp(e.y + 0.5 + Math.sin(hd) * drift, 0.5, N - 0.5);
     G.corpses.push({ type: e.type, x: e.x, y: e.y, hd, armor: e.armor, id: e.id, t, fall, lx: landX, ly: landY, spin: (e.id % 2 ? 1 : -1) * (9 + (e.id % 4)) });
     addScore(10 * (i + 1) * mult, e.x, e.y, t, i >= 1);
-    Sfx.kill(i, t - G.clock);
+    Sfx.kill(i, rd(t));
     sparks(e.x + 0.5, e.y + 0.5, enemyAlt(e.id), t, '#ffe28a', 10);
     addP({ kind: 'fire', x: e.x + 0.5, y: e.y + 0.5, z: enemyAlt(e.id), vx: 0, vy: 0, vz: 0.2, t, life: 0.3, size: 0.6, core: true });
     // fire and smoke along the way down
@@ -663,8 +681,8 @@ function commit(o) {
     explode(landX, landY, 0.3, tc, 1.5 + 0.1 * i);
     impact(landX, landY, tc, 1.6);
     G.rings.push({ x: landX, y: landY, t: tc, life: 0.8, color: '#e8f6ff', r: 2.4 });
-    Sfx.fall(t - G.clock, fall);
-    Sfx.boom(tc - G.clock, 0.2);
+    Sfx.fall(rd(t), fall);
+    Sfx.boom(rd(tc), 0.2);
     lastDown = Math.max(lastDown, tc);
   });
   G.enemies = G.enemies.filter(e => !o.killSet.has(e));
@@ -673,7 +691,7 @@ function commit(o) {
     const t = now + pathDur;
     addScore(10 * (o.kills.length + 1) * mult, o.stomp.x, o.stomp.y, t, false);
     explode(o.stomp.x + 0.5, o.stomp.y + 0.5, 0.4, t, 0.7);
-    Sfx.kill(o.kills.length, pathDur + LEAD);
+    Sfx.kill(o.kills.length, rd(G.clock + pathDur + LEAD));
   }
   G.killed += nk;
   if (nk >= 2) { G.shakeAt = now + pathDur; G.shakeAmp = Math.min(10, 2 + nk * 2); }
@@ -701,7 +719,7 @@ function clearFloor(t) {
   G.pendingClear = true;
   G.tl.end = t + 0.9 * Math.sqrt(G.tl.k);
   G.clearT = t;
-  setTimeout(() => Sfx.clear(), Math.max(0, (t - G.clock) * 1000));
+  setTimeout(() => Sfx.clear(), Math.max(0, rd(t) * 1000));
 }
 
 function enemyPhase(t) {
@@ -716,7 +734,7 @@ function enemyPhase(t) {
     e.marks.forEach(([mx, my], mi) => {
       if (mi % (e.marks.length > 6 ? 2 : 1) === 0) impact(mx + 0.5, my + 0.5, t + 0.04 + 0.025 * (mi % 5), 0.55);
     });
-    Sfx.boom(t - G.clock + 0.05, 0.07);
+    Sfx.boom(rd(t) + 0.05, 0.07);
     for (const [x, y] of e.marks) {
       if (x === P.x && y === P.y) hurt = true;
       if (e.type === 'lancer' || e.type === 'mortar') {
@@ -726,7 +744,7 @@ function enemyPhase(t) {
     }
     if (e.type === 'lancer' || e.type === 'mortar') {
       e.cd = 1;
-      Sfx.fire(t - G.clock);
+      Sfx.fire(rd(t));
     }
   }
   let fi = 0;
@@ -735,7 +753,7 @@ function enemyPhase(t) {
     G.corpses.push({ type: o.type, x: o.x, y: o.y, hd: o.hd, armor: o.armor, id: o.id, t: t + 0.08, fall: 0.001 });
     addScore(10 * mult, o.x, o.y, t + 0.08, false);
     explode(o.x + 0.5, o.y + 0.5, 1.25, t + 0.08, 1);
-    Sfx.kill(fi++, t + 0.08 - G.clock);
+    Sfx.kill(fi++, rd(t + 0.08));
     G.killed++;
   }
   G.enemies = G.enemies.filter(e => !friendly.has(e));
@@ -747,12 +765,12 @@ function enemyPhase(t) {
     G.shakeAt = t;
     G.shakeAmp = 9;
     explode(P.x + 0.5, P.y + 0.5, 1.25, t + 0.04, P.hp <= 0 ? 1.7 : 1.1);
-    Sfx.hurt(t - G.clock);
+    Sfx.hurt(rd(t));
     if (P.hp <= 0) {
       G.over = true;
       G.overT = t + 0.5;
       if (G.score > G.best) { G.best = G.score; G.newBest = true; try { localStorage.setItem('kansei.best', String(G.best)); } catch (e) { /* ignore */ } }
-      setTimeout(() => Sfx.over(), Math.max(0, (t + 0.3 - G.clock) * 1000));
+      setTimeout(() => Sfx.over(), Math.max(0, rd(t + 0.3) * 1000));
       return;
     }
   }
@@ -766,7 +784,7 @@ function enemyPhase(t) {
       e.bornT = t + 0.12 * G.tl.k;
       e.arrive = true;
       G.enemies.push(e);
-      Sfx.spawn(t + 0.12 * G.tl.k - G.clock);
+      Sfx.spawn(rd(t + 0.12 * G.tl.k));
     } else still.push(s);
   }
   G.spawns = still;
@@ -881,6 +899,7 @@ function impact(x, y, t, size) {
 function update() {
   if (G.tl && !busy()) {
     G.tl = null;
+    G.slow = [];
     G.path = null;
     if (G.pendingClear) nextFloor();
     else if (!G.over) computeOptions();
@@ -947,7 +966,7 @@ const patM = (O, ex, ey) => new DOMMatrix([ex[0], ex[1], ey[0], ey[1], O[0], O[1
 function patFill(pat, O, ex, ey) { pat.setTransform(patM(O, ex, ey)); ctx.fillStyle = pat; }
 
 // ---------------------------------------------------------------- camera
-const ZOOM_ACT = 1.75, ZOOM_ENEMY = 1.4;
+const ZOOM_ACT = 1.75, ZOOM_ENEMY = 1.4, ZOOM_KILL = 2.9;
 const CAM = { fx: N / 2, fy: N / 2, zf: ZOOM_ACT, last: null, t: 0, sinP: 1, cosP: 0, c: 1, s: 0, zoom: 1, bx: 0, by: 0, bx0: 0, by0: 0, shx: 0, shy: 0 };
 const PITCH_DOWN = Math.PI / 2, PITCH_FLY = 0.62, YAW_FLY = -0.55, SLAB_D = 2.4;
 function updateCam(now) {
@@ -974,9 +993,15 @@ function updateCam(now) {
     ty = py + 0.5 + (N / 2 - py - 0.5) * 0.45 * e;
     zf = ZOOM_ACT + (ZOOM_ENEMY - ZOOM_ACT) * e;
   }
-  const dtc = Math.min(0.1, Math.max(0, now - (CAM.last == null ? now : CAM.last)));
-  CAM.last = now;
-  const k = t < 0.02 ? 1 : Math.min(1, dtc * 7);
+  // a kill: swoop in on the plane going down
+  let kw = 0, kx = 0, ky = 0;
+  if (G.slow) for (const q of G.slow) { const w = slowW(q, now); if (w > kw) { kw = w; kx = q.x; ky = q.y; } }
+  if (kw > 0) {
+    tx += (kx - tx) * 0.6 * kw; ty += (ky - ty) * 0.6 * kw;
+    zf += (ZOOM_KILL - zf) * kw;
+  }
+  const dtc = Math.min(0.1, G.dtReal == null ? 0.016 : G.dtReal);
+  const k = t < 0.02 ? 1 : Math.min(1, dtc * 8);
   CAM.fx += (tx - CAM.fx) * k; CAM.fy += (ty - CAM.fy) * k; CAM.zf += (zf - CAM.zf) * k;
   CAM.zoom = 1 + (fit * CAM.zf - 1) * t;
   CAM.bx0 = OX + N * CELL / 2;
@@ -1146,9 +1171,9 @@ function drawSlab() {
 // real aircraft, seen from above: Su-47 (you), F-16, A-10, MiG-31, B-2
 const JET = {
   player: { model: 'su47', L: 1.06, body: '#cfd7e0', wing: '#a7b2bf', accent: '#3a6fb8', canopy: '#2b4a6c' },
-  spike: { model: 'f16', L: 0.74, body: '#d2403a', wing: '#a82b2f', accent: '#24305e', canopy: '#1b2447' },
+  spike: { model: 'f16', L: 0.9, body: '#d2403a', wing: '#a82b2f', accent: '#24305e', canopy: '#1b2447' },
   shell: { model: 'a10', L: 1.02, body: '#a3ba30', wing: '#82972a', accent: '#3c4a16', canopy: '#1b2447', pips: true },
-  lancer: { model: 'mig31', L: 1.2, body: '#ea7a2c', wing: '#c45f1f', accent: '#ffd03a', canopy: '#1b2447' },
+  lancer: { model: 'mig31', L: 1.0, body: '#ea7a2c', wing: '#c45f1f', accent: '#ffd03a', canopy: '#1b2447' },
   mortar: { model: 'b2', L: 1.3, body: '#8f3fb0', wing: '#702f8c', accent: '#e3a0ff', canopy: '#1b1020' },
 };
 // each shape: [fore-aft, sideways, height] in fractions of the plane's length; g mirrors it
@@ -2442,8 +2467,15 @@ window.addEventListener('keyup', e => {
 window.addEventListener('blur', () => { held.clear(); chord = new Set(); });
 
 // ============================================================ loop
+let vclock = null, lastReal = 0;
 function frame(t) {
-  G.clock = t / 1000;
+  // the game's clock is real time, slowed over a kill
+  const tr = t / 1000;
+  if (vclock == null) { vclock = tr; lastReal = tr; }
+  G.dtReal = Math.min(0.25, Math.max(0, tr - lastReal));
+  lastReal = tr;
+  vclock += G.dtReal * rateAt(vclock);
+  G.clock = vclock;
   const r = canvas.getBoundingClientRect();
   if (Math.abs(r.width - VW) > 1 || Math.abs(r.height - VH) > 1) resize();
   update();
