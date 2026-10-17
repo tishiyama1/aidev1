@@ -161,34 +161,46 @@ function drawCracks(level, now) {
   ctx.lineCap = 'butt';
 }
 
-// the whale: a plain bone-white silhouette that faces the way it swims
+// the whale, seen from straight above like the rest of the map: a symmetric body, a pair of flippers,
+// flukes spread sideways; it faces the way it swims, and the swimming bends its tail from side to side
 function drawWhale(x, y, ang, len, swim, a) {
   const L = len;
   const sw = Math.sin(swim) * 0.07 * L;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(ang);
-  ctx.scale(1, 1.2);
   ctx.globalAlpha = a;
   ctx.fillStyle = ART.bone;
+  // body outline from the snout to the tail stock; the further back, the more it sways
+  const n = 22, top = [], bot = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, px = (0.5 - 0.84 * t) * L;
+    const w = (0.19 * Math.sin(Math.PI * Math.pow(t, 0.62) * 0.96) * (1 - 0.35 * t * t) + 0.028 * t * t * t) * L;
+    const c = sw * 1.7 * t * t;
+    top.push([px, c - w]); bot.push([px, c + w]);
+  }
+  const tail = sw * 1.7;                      // where the tail stock ends up sideways
   ctx.beginPath();
-  ctx.moveTo(L * 0.5, 0.01 * L);
-  ctx.bezierCurveTo(L * 0.5, -0.12 * L, L * 0.34, -0.16 * L, L * 0.14, -0.13 * L);
-  ctx.bezierCurveTo(-0.08 * L, -0.11 * L, -0.26 * L, -0.07 * L + sw * 0.3, -0.38 * L, -0.025 * L + sw * 0.6);
-  // tail flukes
-  ctx.lineTo(-0.5 * L, -0.15 * L + sw);
-  ctx.quadraticCurveTo(-0.45 * L, 0.0 + sw, -0.5 * L, 0.15 * L + sw);
-  ctx.lineTo(-0.38 * L, 0.03 * L + sw * 0.6);
-  ctx.bezierCurveTo(-0.26 * L, 0.07 * L + sw * 0.3, -0.06 * L, 0.11 * L, 0.14 * L, 0.125 * L);
-  ctx.bezierCurveTo(0.34 * L, 0.14 * L, 0.5 * L, 0.1 * L, L * 0.5, 0.01 * L);
+  ctx.moveTo(top[0][0], top[0][1]);
+  for (let i = 1; i <= n; i++) ctx.lineTo(top[i][0], top[i][1]);
+  // flukes: swept back, notched in the middle
+  const tx = -0.34 * L;
+  ctx.quadraticCurveTo(tx - 0.04 * L, tail - 0.12 * L, -0.5 * L, tail - 0.25 * L + sw * 0.4);
+  ctx.quadraticCurveTo(-0.44 * L, tail - 0.09 * L, -0.45 * L, tail);
+  ctx.quadraticCurveTo(-0.44 * L, tail + 0.09 * L, -0.5 * L, tail + 0.25 * L + sw * 0.4);
+  ctx.quadraticCurveTo(tx - 0.04 * L, tail + 0.12 * L, bot[n][0], bot[n][1]);
+  for (let i = n - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
   ctx.closePath();
   ctx.fill();
-  // flipper
-  ctx.beginPath();
-  ctx.moveTo(0.12 * L, 0.1 * L);
-  ctx.quadraticCurveTo(0.04 * L, 0.2 * L + sw * 0.4, -0.04 * L, 0.2 * L);
-  ctx.quadraticCurveTo(0.02 * L, 0.12 * L, 0.04 * L, 0.1 * L);
-  ctx.fill();
+  // a pair of flippers, swept back from the shoulders
+  for (const g of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(0.16 * L, g * 0.13 * L);
+    ctx.bezierCurveTo(0.14 * L, g * 0.22 * L, 0.04 * L, g * 0.3 * L + sw * 0.15, -0.05 * L, g * 0.3 * L);
+    ctx.bezierCurveTo(-0.08 * L, g * 0.27 * L, -0.01 * L, g * 0.19 * L, 0.0 * L, g * 0.13 * L);
+    ctx.closePath();
+    ctx.fill();
+  }
   ctx.restore();
 }
 
