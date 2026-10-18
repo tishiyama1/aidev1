@@ -75,7 +75,8 @@ const grainSpecks = (() => {
   g.putImageData(im, 0, 0);
   return c;
 })();
-const whale = { a: 0, swim: 0 };
+const WHALE_LEN = 1.7;     // tiles, snout to flukes
+const whale = { a: 0, swim: 0, trail: [] };
 function updateWhale(dt) {
   const p = G.player;
   if (!p) return;
@@ -84,9 +85,20 @@ function updateWhale(dt) {
     const target = Math.atan2(p.vy, p.vx);
     let d = target - whale.a;
     d = Math.atan2(Math.sin(d), Math.cos(d));
-    whale.a += d * Math.min(1, dt * 9);
+    whale.a += d * Math.min(1, dt * 7);
   }
   whale.swim += dt * (2.2 + sp * 1.6);
+  whale.sp = sp; whale.px = p.x; whale.py = p.y;
+  // the body follows the path the whale swam, so a turn bends the whole animal
+  const nx = p.x, ny = p.y;
+  const tr = whale.trail, last = tr[tr.length - 1];
+  if (last && Math.hypot(nx - last[0], ny - last[1]) > 3) tr.length = 0;     // a new floor: start afresh
+  if (!last || Math.hypot(nx - last[0], ny - last[1]) > 0.03) tr.push([nx, ny]);
+  let acc = 0;
+  for (let i = tr.length - 1; i > 0; i--) {
+    acc += Math.hypot(tr[i][0] - tr[i - 1][0], tr[i][1] - tr[i - 1][1]);
+    if (acc > WHALE_LEN * 1.4) { tr.splice(0, i - 1); break; }
+  }
 }
 
 // drifting marine snow (screen space, with a little parallax against the camera)
@@ -161,43 +173,98 @@ function drawCracks(level, now) {
   ctx.lineCap = 'butt';
 }
 
-// the whale, seen from straight above like the rest of the map: a symmetric body, a pair of flippers,
-// flukes spread sideways; it faces the way it swims, and the swimming bends its tail from side to side
-function drawWhale(x, y, ang, len, swim, a) {
-  const L = len;
-  const sw = Math.sin(swim) * 0.07 * L;
+// the whale, seen from straight above (a long, slim rorqual): a rounded snout, the widest part at the shoulders,
+// a body that narrows to a thin tail stock, narrow swept flippers and small flukes. The spine follows
+// the snout's path, so turns curve the whole body, and a wave runs from the head to the tail while it swims.
+const WHALE_W = [[0, 0], [0.012, 0.03], [0.04, 0.047], [0.1, 0.062], [0.22, 0.08], [0.36, 0.086], [0.5, 0.074], [0.65, 0.048], [0.8, 0.027], [0.92, 0.014], [1, 0.011]];
+function whaleHalfWidth(s) {
+  for (let i = 1; i < WHALE_W.length; i++) {
+    if (s <= WHALE_W[i][0]) {
+      const [s0, w0] = WHALE_W[i - 1], [s1, w1] = WHALE_W[i], t = (s - s0) / (s1 - s0), e = t * t * (3 - 2 * t);
+      return w0 + (w1 - w0) * (t * 0.5 + e * 0.5);
+    }
+  }
+  return WHALE_W[WHALE_W.length - 1][1];
+}
+function drawWhale(len, swim, a, X, Y) {
+  const L = len, tr = whale.trail;
+  if (!tr.length) return;
+  const M = 36;
+  // the spine: from the snout (a little ahead of the player) back along the path the whale has swum
+  const pts = [[whale.px + Math.cos(whale.a) * 0.25 * WHALE_LEN, whale.py + Math.sin(whale.a) * 0.25 * WHALE_LEN]];
+  for (let i = tr.length - 1; i >= 0; i--) pts.push(tr[i]);
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const sp = [];
+  let k = 1;
+  for (let i = 0; i <= M; i++) {
+    const dist = Math.pow(i / M, 1.35) * WHALE_LEN;
+    while (k < pts.length - 1 && cum[k] < dist) k++;
+    let x, y;
+    if (pts.length < 2 || dist > cum[pts.length - 1]) {          // ran out of path: carry on straight back
+      const over = dist - cum[pts.length - 1], q = pts[pts.length - 1], r = pts.length > 1 ? pts[pts.length - 2] : null;
+      let dx = r ? q[0] - r[0] : -Math.cos(whale.a), dy = r ? q[1] - r[1] : -Math.sin(whale.a);
+      const dl = Math.hypot(dx, dy) || 1;
+      x = q[0] + dx / dl * over; y = q[1] + dy / dl * over;
+    } else {
+      const seg = cum[k] - cum[k - 1] || 1, u = (dist - cum[k - 1]) / seg;
+      x = pts[k - 1][0] + (pts[k][0] - pts[k - 1][0]) * u; y = pts[k - 1][1] + (pts[k][1] - pts[k - 1][1]) * u;
+    }
+    sp.push([X(x), Y(y)]);
+  }
+  // a turn is a sweeping curve, not a corner: relax the spine (the snout stays put)
+  for (let pass = 0; pass < 16; pass++) {
+    for (let i = 1; i < M; i++) { sp[i][0] = (sp[i - 1][0] + sp[i][0] * 2 + sp[i + 1][0]) / 4; sp[i][1] = (sp[i - 1][1] + sp[i][1] * 2 + sp[i + 1][1]) / 4; }
+  }
+  // the swimming wave
+  const amp = (0.018 + 0.04 * Math.min(1, (whale.sp || 0) / 3)) * L;
+  const raw = sp.map(p => p.slice());
+  for (let i = 1; i <= M; i++) {
+    const t = i / M, p0 = raw[Math.max(0, i - 1)], p1 = raw[Math.min(M, i + 1)];
+    let tx = p1[0] - p0[0], ty = p1[1] - p0[1]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+    const off = amp * Math.pow(t, 1.5) * Math.sin(swim - 4.2 * t);
+    sp[i][0] += -ty * off; sp[i][1] += tx * off;
+  }
+  const left = [], right = [];
+  for (let i = 0; i <= M; i++) {
+    const p0 = sp[Math.max(0, i - 1)], p1 = sp[Math.min(M, i + 1)];
+    let tx = p0[0] - p1[0], ty = p0[1] - p1[1]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;   // pointing head-ward
+    const w = whaleHalfWidth(i === 0 ? 0 : Math.pow(i / M, 1.35)) * L;
+    left.push([sp[i][0] - ty * w, sp[i][1] + tx * w]);
+    right.push([sp[i][0] + ty * w, sp[i][1] - tx * w]);
+  }
+  // the tail: where it points
+  const E = sp[M], Q = sp[M - 2];
+  let bx = E[0] - Q[0], by = E[1] - Q[1]; const bl = Math.hypot(bx, by) || 1; bx /= bl; by /= bl;   // away from the head
+  const nxx = -by, nyy = bx;
   ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(ang);
   ctx.globalAlpha = a;
   ctx.fillStyle = ART.bone;
-  // body outline from the snout to the tail stock; the further back, the more it sways
-  const n = 22, top = [], bot = [];
-  for (let i = 0; i <= n; i++) {
-    const t = i / n, px = (0.5 - 0.84 * t) * L;
-    const w = (0.19 * Math.sin(Math.PI * Math.pow(t, 0.62) * 0.96) * (1 - 0.35 * t * t) + 0.028 * t * t * t) * L;
-    const c = sw * 1.7 * t * t;
-    top.push([px, c - w]); bot.push([px, c + w]);
-  }
-  const tail = sw * 1.7;                      // where the tail stock ends up sideways
   ctx.beginPath();
-  ctx.moveTo(top[0][0], top[0][1]);
-  for (let i = 1; i <= n; i++) ctx.lineTo(top[i][0], top[i][1]);
-  // flukes: swept back, notched in the middle
-  const tx = -0.34 * L;
-  ctx.quadraticCurveTo(tx - 0.04 * L, tail - 0.12 * L, -0.5 * L, tail - 0.25 * L + sw * 0.4);
-  ctx.quadraticCurveTo(-0.44 * L, tail - 0.09 * L, -0.45 * L, tail);
-  ctx.quadraticCurveTo(-0.44 * L, tail + 0.09 * L, -0.5 * L, tail + 0.25 * L + sw * 0.4);
-  ctx.quadraticCurveTo(tx - 0.04 * L, tail + 0.12 * L, bot[n][0], bot[n][1]);
-  for (let i = n - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
+  ctx.moveTo(left[0][0], left[0][1]);
+  for (let i = 1; i <= M; i++) ctx.lineTo(left[i][0], left[i][1]);
+  const wl = left[M], wr = right[M];
+  const tip = (sgn) => [E[0] + bx * 0.09 * L + nxx * sgn * 0.2 * L, E[1] + by * 0.09 * L + nyy * sgn * 0.2 * L];
+  const tl2 = tip(1), tr2 = tip(-1), notch = [E[0] + bx * 0.035 * L, E[1] + by * 0.035 * L];
+  ctx.quadraticCurveTo(E[0] + bx * 0.0 * L + nxx * 0.12 * L, E[1] + by * 0.0 * L + nyy * 0.12 * L, tl2[0], tl2[1]);
+  ctx.quadraticCurveTo(E[0] + bx * 0.1 * L + nxx * 0.11 * L, E[1] + by * 0.1 * L + nyy * 0.11 * L, notch[0], notch[1]);
+  ctx.quadraticCurveTo(E[0] + bx * 0.1 * L - nxx * 0.11 * L, E[1] + by * 0.1 * L - nyy * 0.11 * L, tr2[0], tr2[1]);
+  ctx.quadraticCurveTo(E[0] + bx * 0.0 * L - nxx * 0.12 * L, E[1] + by * 0.0 * L - nyy * 0.12 * L, wr[0], wr[1]);
+  for (let i = M - 1; i >= 0; i--) ctx.lineTo(right[i][0], right[i][1]);
   ctx.closePath();
   ctx.fill();
-  // a pair of flippers, swept back from the shoulders
-  for (const g of [-1, 1]) {
+  // flippers: narrow and swept back from the shoulders, drawn at the same moment as the body bends
+  const fi = Math.round(M * Math.pow(0.36, 1 / 1.35));
+  for (const [edge, sgn] of [[left, 1], [right, -1]]) {
+    const base = edge[fi], b2 = edge[Math.min(M, fi + 3)];
+    const P0 = sp[fi], P1 = sp[Math.min(M, fi + 2)];
+    let hx = P0[0] - P1[0], hy = P0[1] - P1[1]; const hl = Math.hypot(hx, hy) || 1; hx /= hl; hy /= hl;   // head-ward
+    const ox = (base[0] - P0[0]), oy = (base[1] - P0[1]), ol = Math.hypot(ox, oy) || 1;
+    const tipx = base[0] + (ox / ol) * 0.14 * L - hx * 0.22 * L, tipy = base[1] + (oy / ol) * 0.14 * L - hy * 0.22 * L;
     ctx.beginPath();
-    ctx.moveTo(0.16 * L, g * 0.13 * L);
-    ctx.bezierCurveTo(0.14 * L, g * 0.22 * L, 0.04 * L, g * 0.3 * L + sw * 0.15, -0.05 * L, g * 0.3 * L);
-    ctx.bezierCurveTo(-0.08 * L, g * 0.27 * L, -0.01 * L, g * 0.19 * L, 0.0 * L, g * 0.13 * L);
+    ctx.moveTo(base[0], base[1]);
+    ctx.quadraticCurveTo(base[0] + (ox / ol) * 0.1 * L - hx * 0.05 * L, base[1] + (oy / ol) * 0.1 * L - hy * 0.05 * L, tipx, tipy);
+    ctx.quadraticCurveTo(b2[0] + (ox / ol) * 0.05 * L - hx * 0.12 * L, b2[1] + (oy / ol) * 0.05 * L - hy * 0.12 * L, b2[0], b2[1]);
     ctx.closePath();
     ctx.fill();
   }
@@ -432,7 +499,8 @@ const Sfx = (() => {
         tone(f * 0.97, 0.18, { vol: 0.06 * (1 - i * 0.25) * (0.6 + k), delay: (0.11 + 0.12 * k) * i });
       }
     },
-    step() { noise(0.035, { vol: 0.035, freq: 900, q: 2 }); },
+    // a flick of the tail: a soft swish of moving water
+    step() { noise(0.24, { vol: 0.03, freq: 260, q: 0.6 }); tone(170, 0.2, { vol: 0.018, to: 105 }); },
     mstep(v, pan) {
       tone(58, 0.14, { type: 'triangle', vol: 0.5 * v, to: 38, pan });
       noise(0.06, { vol: 0.25 * v, freq: 180, pan });
@@ -458,9 +526,13 @@ const Sfx = (() => {
     crystal(v, pan) {
       [1760, 2217.5, 2637].forEach((f, i) => tone(f, 1.6, { vol: 0.05 * v, pan, delay: i * 0.03, attack: 0.01 }));
     },
+    // swimming through a plume of bubbles: a bubbling burble
     splash() {
-      noise(0.22, { vol: 0.16, freq: 1300, q: 0.7 });
-      tone(380, 0.12, { vol: 0.05, to: 900 });
+      noise(0.32, { vol: 0.07, freq: 2300, q: 0.5 });
+      for (let i = 0; i < 6; i++) {
+        const f = 420 + Math.random() * 700;
+        tone(f, 0.07, { vol: 0.045, to: f * 1.6, delay: i * 0.045 + Math.random() * 0.02 });
+      }
     },
     breath(v, pan) { noise(0.6, { vol: 0.07 * v, freq: 380, q: 1.5, pan }); },
     alarm(v, pan) {
@@ -1254,24 +1326,26 @@ function draw() {
     }
   }
 
-  // heard water
+  // heard vents: columns of bubbles rising out of the floor, swelling as they come up
   if (G.hasWater) {
-    ctx.strokeStyle = ART.water;
-    ctx.lineWidth = Math.max(1, SCALE * 0.04);
+    ctx.lineWidth = Math.max(1, SCALE * 0.035);
     for (let ty = ty0; ty <= ty1; ty++) {
       for (let tx = tx0; tx <= tx1; tx++) {
         const i = ty * G.mw + tx;
         const t = G.waterT[i];
         if (t < 0) continue;
-        ctx.globalAlpha = Math.max(0.2, 0.75 * Math.exp(-(G.now - t) / 2.4));
-        for (let k = 0; k < 2; k++) {
-          const yy = Y(ty + 0.3 + k * 0.42), x0 = X(tx + 0.12 + k * 0.2), w = SCALE * 0.5;
-          const ph = G.now * 2 + tx + ty * 1.7 + k;
-          ctx.beginPath();
-          ctx.moveTo(x0, yy);
-          ctx.quadraticCurveTo(x0 + w * 0.25, yy - SCALE * 0.08 * Math.sin(ph), x0 + w * 0.5, yy);
-          ctx.quadraticCurveTo(x0 + w * 0.75, yy + SCALE * 0.08 * Math.sin(ph), x0 + w, yy);
-          ctx.stroke();
+        const base = Math.max(0.2, 0.8 * Math.exp(-(G.now - t) / 2.4));
+        for (let k = 0; k < 5; k++) {
+          const ph = (G.now * (0.28 + 0.2 * hash2(tx * 3 + k, ty)) + hash2(tx + k * 9, ty * 5 + 2)) % 1;
+          const hx = 0.12 + 0.76 * hash2(tx * 5 + k, ty * 3 + 1) + 0.05 * Math.sin(G.now * 2 + k + tx);
+          const hy = 0.12 + 0.76 * hash2(ty * 5 + k + 77, tx * 7 + 3);
+          const r = SCALE * (0.025 + 0.085 * ph);
+          ctx.globalAlpha = base * Math.sin(Math.PI * Math.min(1, ph * 1.05)) ;
+          ctx.strokeStyle = ART.water;
+          ctx.beginPath(); ctx.arc(X(tx + hx), Y(ty + hy), r, 0, TAU); ctx.stroke();
+          ctx.globalAlpha *= 0.7;
+          ctx.fillStyle = '#d8f0f0';
+          ctx.fillRect(X(tx + hx) - r * 0.45 - 0.5, Y(ty + hy) - r * 0.45 - 0.5, Math.max(1, r * 0.25), Math.max(1, r * 0.25));
         }
       }
     }
@@ -1437,7 +1511,7 @@ function draw() {
     ctx.beginPath();
     ctx.arc(px, py, SCALE * 1.0, 0, TAU);
     ctx.fill();
-    drawWhale(px, py, whale.a, SCALE * 1.2 * shrink, whale.swim, shrink);
+    drawWhale(SCALE * WHALE_LEN * shrink, whale.swim, shrink, X, Y);
     if (p.charging) {
       const R = pingRadius(p.chargeT);
       const k = clamp(p.chargeT / 1.1, 0, 1);
