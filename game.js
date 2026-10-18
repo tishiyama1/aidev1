@@ -499,7 +499,8 @@ const Sfx = (() => {
         tone(f * 0.97, 0.18, { vol: 0.06 * (1 - i * 0.25) * (0.6 + k), delay: (0.11 + 0.12 * k) * i });
       }
     },
-    step() { noise(0.035, { vol: 0.035, freq: 900, q: 2 }); },
+    // a flick of the tail: a soft swish of moving water
+    step() { noise(0.24, { vol: 0.03, freq: 260, q: 0.6 }); tone(170, 0.2, { vol: 0.018, to: 105 }); },
     mstep(v, pan) {
       tone(58, 0.14, { type: 'triangle', vol: 0.5 * v, to: 38, pan });
       noise(0.06, { vol: 0.25 * v, freq: 180, pan });
@@ -525,9 +526,13 @@ const Sfx = (() => {
     crystal(v, pan) {
       [1760, 2217.5, 2637].forEach((f, i) => tone(f, 1.6, { vol: 0.05 * v, pan, delay: i * 0.03, attack: 0.01 }));
     },
+    // swimming through a plume of bubbles: a bubbling burble
     splash() {
-      noise(0.22, { vol: 0.16, freq: 1300, q: 0.7 });
-      tone(380, 0.12, { vol: 0.05, to: 900 });
+      noise(0.32, { vol: 0.07, freq: 2300, q: 0.5 });
+      for (let i = 0; i < 6; i++) {
+        const f = 420 + Math.random() * 700;
+        tone(f, 0.07, { vol: 0.045, to: f * 1.6, delay: i * 0.045 + Math.random() * 0.02 });
+      }
     },
     breath(v, pan) { noise(0.6, { vol: 0.07 * v, freq: 380, q: 1.5, pan }); },
     alarm(v, pan) {
@@ -1321,24 +1326,26 @@ function draw() {
     }
   }
 
-  // heard water
+  // heard vents: columns of bubbles rising out of the floor, swelling as they come up
   if (G.hasWater) {
-    ctx.strokeStyle = ART.water;
-    ctx.lineWidth = Math.max(1, SCALE * 0.04);
+    ctx.lineWidth = Math.max(1, SCALE * 0.035);
     for (let ty = ty0; ty <= ty1; ty++) {
       for (let tx = tx0; tx <= tx1; tx++) {
         const i = ty * G.mw + tx;
         const t = G.waterT[i];
         if (t < 0) continue;
-        ctx.globalAlpha = Math.max(0.2, 0.75 * Math.exp(-(G.now - t) / 2.4));
-        for (let k = 0; k < 2; k++) {
-          const yy = Y(ty + 0.3 + k * 0.42), x0 = X(tx + 0.12 + k * 0.2), w = SCALE * 0.5;
-          const ph = G.now * 2 + tx + ty * 1.7 + k;
-          ctx.beginPath();
-          ctx.moveTo(x0, yy);
-          ctx.quadraticCurveTo(x0 + w * 0.25, yy - SCALE * 0.08 * Math.sin(ph), x0 + w * 0.5, yy);
-          ctx.quadraticCurveTo(x0 + w * 0.75, yy + SCALE * 0.08 * Math.sin(ph), x0 + w, yy);
-          ctx.stroke();
+        const base = Math.max(0.2, 0.8 * Math.exp(-(G.now - t) / 2.4));
+        for (let k = 0; k < 5; k++) {
+          const ph = (G.now * (0.28 + 0.2 * hash2(tx * 3 + k, ty)) + hash2(tx + k * 9, ty * 5 + 2)) % 1;
+          const hx = 0.12 + 0.76 * hash2(tx * 5 + k, ty * 3 + 1) + 0.05 * Math.sin(G.now * 2 + k + tx);
+          const hy = 0.12 + 0.76 * hash2(ty * 5 + k + 77, tx * 7 + 3);
+          const r = SCALE * (0.025 + 0.085 * ph);
+          ctx.globalAlpha = base * Math.sin(Math.PI * Math.min(1, ph * 1.05)) ;
+          ctx.strokeStyle = ART.water;
+          ctx.beginPath(); ctx.arc(X(tx + hx), Y(ty + hy), r, 0, TAU); ctx.stroke();
+          ctx.globalAlpha *= 0.7;
+          ctx.fillStyle = '#d8f0f0';
+          ctx.fillRect(X(tx + hx) - r * 0.45 - 0.5, Y(ty + hy) - r * 0.45 - 0.5, Math.max(1, r * 0.25), Math.max(1, r * 0.25));
         }
       }
     }
